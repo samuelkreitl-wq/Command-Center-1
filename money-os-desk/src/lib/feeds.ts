@@ -20,7 +20,11 @@ import {
 import { buildSnapshot } from "./desk";
 import { fetchFearGreed } from "./fear-greed";
 import type { CallLedger } from "./call-ledger";
-import { advanceBtc15Calls, type Btc15CallInput } from "./call-lifecycle";
+import {
+  advanceBtc15Calls,
+  type Btc15CallInput,
+  type CycleAction,
+} from "./call-lifecycle";
 
 export interface FeedBundle {
   contract: ContractWindow | null;
@@ -144,6 +148,7 @@ export function listedWindowToCallInput(
     openTime: window.openTime,
     closeTime: window.closeTime,
     floorStrike: window.floorStrike,
+    expirationValue: window.expirationValue,
     spot:
       spot && spot.source === "kraken" && Number.isFinite(spot.price) && spot.price > 0
         ? { price: spot.price, ts: spot.ts, source: "kraken" }
@@ -153,49 +158,76 @@ export function listedWindowToCallInput(
   };
 }
 
+function mergeListed(windows: Btc15ListedWindow[]): Btc15ListedWindow[] {
+  const byKey = new Map<string, Btc15ListedWindow>();
+  for (const window of windows) {
+    const key = `${window.ticker}::${window.openTime}::${window.closeTime}`;
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, { ...window });
+      continue;
+    }
+    byKey.set(key, {
+      ...prev,
+      floorStrike: window.floorStrike ?? prev.floorStrike,
+      expirationValue: window.expirationValue ?? prev.expirationValue,
+      strikeType: window.strikeType ?? prev.strikeType,
+      yesSubTitle: window.yesSubTitle || prev.yesSubTitle,
+      status: window.expirationValue != null ? window.status : prev.status,
+    });
+  }
+  return [...byKey.values()];
+}
+
+function settledReason(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
 /**
- * Lock the next unopened window and revise the window sitting in its
- * halfway checkpoint. Uses the same Kraken read as the desk poll.
- * A missing floor_strike stays null.
+ * One read-only pass: public Kraken and Kalshi GETs, then the next-window
+ * cycle. Fetches never place orders. A missing floor_strike stays null.
+ * Duplicate rows keep a published strike and expiration when one copy has them.
  */
 export async function advanceListedBtc15(
   ledger: CallLedger,
   now = Date.now()
-): Promise<{ advanced: ReturnType<typeof advanceBtc15Calls>; errors: string[] }> {
+): Promise<{ actions: CycleAction[]; errors: string[] }> {
   const errors: string[] = [];
   let spot: SpotTick | null = null;
   let bars: Bar1m[] = [];
-  let windows: Btc15ListedWindow[] = [];
+  const windows: Btc15ListedWindow[] = [];
 
   const results = await Promise.allSettled([
     pollKraken(),
     fetchListed15mWindows("unopened"),
     fetchListed15mWindows("open"),
+    fetchListed15mWindows("settled"),
   ]);
 
   if (results[0].status === "fulfilled") {
     spot = results[0].value.spot;
     bars = results[0].value.bars;
   } else {
-    errors.push(
-      `kraken: ${results[0].reason instanceof Error ? results[0].reason.message : String(results[0].reason)}`
-    );
+    errors.push(`kraken: ${settledReason(results[0].reason)}`);
   }
-  if (results[1].status === "fulfilled") windows.push(...results[1].value);
-  else {
-    errors.push(
-      `kalshi unopened: ${results[1].reason instanceof Error ? results[1].reason.message : String(results[1].reason)}`
-    );
-  }
-  if (results[2].status === "fulfilled") windows.push(...results[2].value);
-  else {
-    errors.push(
-      `kalshi open: ${results[2].reason instanceof Error ? results[2].reason.message : String(results[2].reason)}`
-    );
+  const lists: Array<[string, PromiseSettledResult<Btc15ListedWindow[]>]> = [
+    ["kalshi unopened", results[1]],
+    ["kalshi open", results[2]],
+    ["kalshi settled", results[3]],
+  ];
+  for (const [label, result] of lists) {
+    if (result.status === "fulfilled") windows.push(...result.value);
+    else errors.push(`${label}: ${settledReason(result.reason)}`);
   }
 
-  const inputs = windows.map((window) =>
+  const inputs = mergeListed(windows).map((window) =>
     listedWindowToCallInput(window, spot, bars, now)
   );
-  return { advanced: advanceBtc15Calls(ledger, inputs), errors };
+  let actions: CycleAction[] = [];
+  try {
+    actions = advanceBtc15Calls(ledger, inputs);
+  } catch (error) {
+    errors.push(`cycle: ${settledReason(error)}`);
+  }
+  return { actions, errors };
 }

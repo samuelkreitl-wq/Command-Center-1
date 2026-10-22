@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --import tsx --test src/lib/*.test.ts"
+    "test": "node --import tsx --test src/lib/*.test.ts",
+    "btc15:loop": "node --import tsx src/btc15-loop.ts"
   },
   "devDependencies": {
     "tsx": "^4.20.6"

@@ -66,10 +66,29 @@ export interface SettlementRecord {
   finalHit: boolean;
 }
 
+/** The process was down at lock time. This is not a call and not a late lock. */
+export interface MissedRecord {
+  at: number;
+  reason: string;
+  openTime: string;
+  closeTime: string;
+  ticker: string;
+}
+
 export type LedgerEvent =
   | { type: "initial"; windowId: string; decision: CallDecision }
   | { type: "revision"; windowId: string; revision: CallRevision }
-  | { type: "settlement"; windowId: string; settlement: SettlementRecord };
+  | { type: "settlement"; windowId: string; settlement: SettlementRecord }
+  | { type: "missed"; windowId: string; missed: MissedRecord };
+
+/**
+ * Optional file (or other) backend. append must add one event and leave
+ * every earlier event byte-for-byte unchanged.
+ */
+export interface LedgerSink {
+  load(): LedgerEvent[];
+  append(event: LedgerEvent): void;
+}
 
 export interface WindowCallState {
   windowId: string;
@@ -120,12 +139,15 @@ function deepFreeze<T>(value: T): T {
 
 export class CallLedger {
   private events: LedgerEvent[];
+  private sink: LedgerSink | null;
 
   constructor(
     private store: KeyValueStore = new MemoryStore(),
-    private key = CALL_LEDGER_KEY
+    private key = CALL_LEDGER_KEY,
+    sink?: LedgerSink | null
   ) {
-    this.events = loadEvents(store, key);
+    this.sink = sink ?? null;
+    this.events = this.sink ? this.sink.load() : loadEvents(store, key);
   }
 
   all(): readonly LedgerEvent[] {
@@ -136,7 +158,8 @@ export class CallLedger {
   append(event: LedgerEvent): void {
     const frozen = deepFreeze(structuredClone(event));
     this.events.push(frozen);
-    this.store.setItem(this.key, JSON.stringify(this.events));
+    if (this.sink) this.sink.append(frozen);
+    else this.store.setItem(this.key, JSON.stringify(this.events));
   }
 }
 

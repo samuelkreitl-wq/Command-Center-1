@@ -16,9 +16,12 @@ export interface KrakenTickerResult {
   ts: number;
 }
 
+const FETCH_TIMEOUT_MS = 8_000;
+
 async function getJson(url: string): Promise<unknown> {
   const res = await fetch(url, {
     headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`Kraken HTTP ${res.status} ${url}`);

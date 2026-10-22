@@ -82,9 +82,14 @@ function dollars(s?: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+const FETCH_TIMEOUT_MS = 8_000;
+
 async function getJson(path: string): Promise<unknown> {
   const url = path.startsWith("http") ? path : `${KALSHI_BASE}${path}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
   if (!res.ok) {
     throw new Error(`Kalshi HTTP ${res.status} ${url}`);
   }

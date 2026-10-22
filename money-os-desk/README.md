@@ -9,7 +9,9 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 | `types.ts` | Contract, lock, paper, snapshot types (+ Fear & Greed) |
 | `strike-call.ts` | Last vs strike, one-cent AT STRIKE band, halfway timing |
 | `call-lifecycle.ts` | Pre-start lock, one halfway revision, settlement scoring |
-| `call-ledger.ts` | Append-only initial / revision / settlement events |
+| `call-ledger.ts` | Append-only initial / revision / settlement / missed events |
+| `jsonl-ledger.ts` | JSONL file ledger for the unattended runner |
+| `btc15-loop.ts` | `npm run btc15:loop` — one process, no screen |
 | `signal-lock.ts` | Legacy core lock for the paper journal |
 | `engine.ts` | RSI(7), EMA9/21, VWAP, volume readings |
 | `hard-stop.ts` | Cooldown after miss |
@@ -54,7 +56,8 @@ See [CALL_LIFECYCLE.md](./CALL_LIFECYCLE.md).
 - In-window comparison is Kraken last vs the published `floor_strike`, with a $0.01 AT STRIKE band. Equality is AT STRIKE.
 - Before the strike is published the pre-start call is a trend projection and the strike field stays null.
 - Agreement is strong or weak and does not change the call.
-- Run `npm test` in this folder.
+- `npm run btc15:loop` locks only the next window in the last 120 seconds before open, revises once at halfway, and appends settlement when Kalshi publishes `expiration_value`. The ledger is `data/btc15-calls.jsonl` (gitignored) and is reloaded on startup. A window with no pre-start lock is marked missed and is not invented later.
+- Run `npm test` in this folder. Keeping the loop up on a Mac (`nohup`, `pm2`, `launchd`) is in [CALL_LIFECYCLE.md](./CALL_LIFECYCLE.md).
 
 ## Other rules
 
