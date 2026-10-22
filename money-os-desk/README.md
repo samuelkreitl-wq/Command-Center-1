@@ -16,6 +16,7 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 | `kraken.ts` | **Live** REST ticker + 1m OHLC |
 | `kalshi.ts` | **Live** KXBTC15M markets + orderbook |
 | `feeds.ts` | Poll loop → buildSnapshot |
+| `sports-picks.ts` | Live sports recommendations (Dabble / prediction markets) |
 
 ## Live feeds
 
