@@ -7,10 +7,13 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 | File | Role |
 |------|------|
 | `types.ts` | Contract, lock, paper, snapshot types (+ Fear & Greed) |
-| `signal-lock.ts` | Immutable core lock |
-| `engine.ts` | RSI/EMA/VWAP heuristic + book action |
+| `strike-call.ts` | Last vs strike, one-cent AT STRIKE band, halfway timing |
+| `call-lifecycle.ts` | Pre-start lock, one halfway revision, settlement scoring |
+| `call-ledger.ts` | Append-only initial / revision / settlement events |
+| `signal-lock.ts` | Legacy core lock for the paper journal |
+| `engine.ts` | RSI(7), EMA9/21, VWAP, volume readings |
 | `hard-stop.ts` | Cooldown after miss |
-| `paper.ts` | Paper YES/NO (not sent to Kalshi) |
+| `paper.ts` | Paper YES/NO (not sent to Kalshi). Tie follows the contract (Yes) |
 | `journal.ts` | localStorage journal + trade log |
 | `desk.ts` | Facade: snapshot, lock, paper, settle |
 | `kraken.ts` | **Live** REST ticker + 1m OHLC |
@@ -41,9 +44,19 @@ const stop = startFeedLoop((b) => {
 - Also yesterday and ~last week
 - Available on every snapshot as `snapshot.fearGreed`
 
-## Rules
+## BTC15 call
 
-- First core lock per window is permanent
-- Settlement: endPx >= strike → UP
-- Paper settles vs strike, not custom ref
-- Hard-stop blocks paper after a miss
+See [CALL_LIFECYCLE.md](./CALL_LIFECYCLE.md).
+
+- Every window gets UP, DOWN, or AT STRIKE. The quality flag does not cancel it.
+- The initial call locks before `openTime` and is not rewritten.
+- One revision is allowed during the 60s checkpoint at 7.5 minutes. Then the call is final.
+- In-window comparison is Kraken last vs the published `floor_strike`, with a $0.01 AT STRIKE band. Equality is AT STRIKE.
+- Before the strike is published the pre-start call is a trend projection and the strike field stays null.
+- Agreement is strong or weak and does not change the call.
+- Run `npm test` in this folder.
+
+## Other rules
+
+- Paper settles vs strike, not custom ref. An exact tie is UP, matching the Kalshi Yes rule.
+- Hard-stop blocks paper after a miss.

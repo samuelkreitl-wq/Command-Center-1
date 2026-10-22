@@ -1,6 +1,11 @@
 /** Money OS — Kalshi short-window desk types (Phase 1+2) */
 
-export type Direction = "UP" | "DOWN";
+/** UP / DOWN / AT STRIKE. Equality with the strike is AT STRIKE, not UP. */
+export type Direction = "UP" | "DOWN" | "AT STRIKE";
+/** Freshness of the inputs attached to a call. Never suppresses the call. */
+export type DataQuality = "LIVE" | "STALE" | "NO DATA";
+/** How strongly the evidence agrees with a call. Never changes the call. */
+export type Agreement = "strong" | "weak";
 export type MarketWindow = "15m" | "5m";
 export type SignalAction = "NO_TRADE" | "WATCH" | "LEAN_YES" | "LEAN_NO";
 export type TradeMode = "paper" | "live";
@@ -98,8 +103,12 @@ export interface DeskSnapshot {
   distanceToStrike: number | null;
   distanceToCustom: number | null;
   minutesLeft: number | null;
+  /** Locked BTC15 call when one exists. Null until the pre-start lock runs. */
   liveCall: Direction | null;
-  confidence: number;
+  /** Strong/weak evidence agreement. Not a probability and not an input to the call. */
+  agreement: Agreement | null;
+  /** Data-quality flag stored with the in-force call, or the current reading if none is locked. */
+  dataQuality: DataQuality | null;
   action: SignalAction;
   actionWhy: string;
   factors: string[];
