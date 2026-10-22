@@ -73,6 +73,22 @@ export interface HardStopState {
   lastMissTicker?: string;
 }
 
+/** Crypto Fear & Greed (alternative.me) */
+export interface FearGreedReading {
+  value: number;
+  classification: string;
+  timestamp: number;
+  timeUntilUpdate?: number;
+}
+
+export interface FearGreedSnapshot {
+  current: FearGreedReading | null;
+  yesterday?: FearGreedReading | null;
+  lastWeek?: FearGreedReading | null;
+  fetchedAt: number;
+  error?: string;
+}
+
 export interface DeskSnapshot {
   contract: ContractWindow | null;
   spot: SpotTick | null;
@@ -91,4 +107,5 @@ export interface DeskSnapshot {
   scalp: ScalpState | null;
   hardStop: HardStopState;
   evidence: { settled: number; target: number; wins: number; winRate: string };
+  fearGreed?: FearGreedSnapshot | null;
 }

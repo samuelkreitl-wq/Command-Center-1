@@ -6,7 +6,7 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 
 | File | Role |
 |------|------|
-| `types.ts` | Contract, lock, paper, snapshot types |
+| `types.ts` | Contract, lock, paper, snapshot types (+ Fear & Greed) |
 | `signal-lock.ts` | Immutable core lock |
 | `engine.ts` | RSI/EMA/VWAP heuristic + book action |
 | `hard-stop.ts` | Cooldown after miss |
@@ -15,10 +15,8 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 | `desk.ts` | Facade: snapshot, lock, paper, settle |
 | `kraken.ts` | **Live** REST ticker + 1m OHLC |
 | `kalshi.ts` | **Live** KXBTC15M markets + orderbook |
-| `feeds.ts` | Poll loop → buildSnapshot |
-| `sports-picks.ts` | Live sports recommendations (Dabble / prediction markets) |
-| `stake-rounding.ts` | **Arbitrage account survival** — human stake sizing + jitter for soft books |
-| `stake-rounding.example.ts` | Quick demo of 2-way arb stake rounding |
+| `feeds.ts` | Poll loop → buildSnapshot (includes Fear & Greed) |
+| `fear-greed.ts` | **Live** Crypto Fear & Greed Index (alternative.me) |
 
 ## Live feeds
 
@@ -28,22 +26,20 @@ Public data only — no API keys.
 import { startFeedLoop } from "./feeds";
 
 const stop = startFeedLoop((b) => {
-  // b.contract?.strike, b.spot?.price, b.snapshot.leanVsStrike, b.errors
+  // b.contract?.strike, b.spot?.price, b.snapshot.leanVsStrike
+  // b.fearGreed?.current?.value, b.fearGreed?.current?.classification
+  // b.errors
 }, { market: "15m", intervalMs: 8000 });
 ```
 
 5m: `SERIES_5M` is null until Kalshi lists a series.
 
-## Stake Rounding (Arbitrage Survival)
+## Fear & Greed
 
-Use for sportsbook arbing or any soft-book activity to reduce detection risk:
-
-```ts
-import { balanceTwoWayArb } from "./stake-rounding";
-
-const result = balanceTwoWayArb(2.45, 1.74, 1000, "soft", "soft");
-// Rounded, human-looking stakes with controlled residual risk
-```
+- Source: https://api.alternative.me/fng/
+- Current value (0–100) + classification (Extreme Fear / Fear / Neutral / Greed / Extreme Greed)
+- Also yesterday and ~last week
+- Available on every snapshot as `snapshot.fearGreed`
 
 ## Rules
 
