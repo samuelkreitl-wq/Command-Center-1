@@ -415,8 +415,15 @@ describe("advance", () => {
     assert.equal(book.all()[1].type === "revision" && book.all()[1].revision.call, "UP");
 
     const missed = ledger();
-    advanceBtc15Calls(missed, [input(OPEN + 1_000)]);
-    assert.equal(missed.all().length, 0);
+    const missedActions = advanceBtc15Calls(missed, [input(OPEN + 1_000)]);
+    assert.equal(missedActions.length, 1);
+    assert.equal(missedActions[0].kind, "missed");
+    assert.equal(missed.all().length, 1);
+    assert.equal(missed.all()[0].type, "missed");
+    assert.equal(
+      missed.all().some((event) => event.type === "initial"),
+      false
+    );
   });
 });
 

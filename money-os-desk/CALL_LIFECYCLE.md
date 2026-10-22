@@ -49,13 +49,100 @@ Indicators at halfway are SUPPORTS, CONFLICTS, or NEUTRAL citations with the raw
 
 Before the checkpoint, a revision is rejected. After it, the call is final and a revision is rejected. A second revision is rejected. If the strike is still unpublished at halfway, the revision stays on the trend projection and says so. It does not invent the strike.
 
-`advanceBtc15Calls` only locks in the pre-start phase and only revises inside the checkpoint. A window that is first seen after open does not receive a late initial call.
+`advanceBtc15Calls` locks only the single soonest future window, and only during the last 120 seconds before its `openTime` (`LOCK_LEAD_MS`). A snapshot that lists the rest of the day does not lock those windows. The same pass revises a window that is already locked and is inside its halfway checkpoint. A window first seen after open is not locked late.
 
 ## Storage and scoring
 
-`CallLedger` appends `initial`, `revision`, and `settlement` events. It does not edit an event after append. Browser `localStorage` key: `moneyos.btc.callLedger.v1`. Tests use an in-memory store.
+`CallLedger` appends `initial`, `revision`, `settlement`, and `missed` events. It does not edit an event after append. The desk facade still uses browser `localStorage` key `moneyos.btc.callLedger.v1`. The unattended runner uses an append-only JSONL file instead (see below). Tests use an in-memory store or a temp file.
 
-Settlement adds `outcome`, `initialHit`, and `finalHit`. A hit means the call equals the outcome under the same epsilon rule. The initial decision and the revision stay as written. A second settlement is rejected.
+Settlement adds `outcome`, `initialHit`, and `finalHit`. A hit means the call equals the outcome under the same epsilon rule. The initial decision and the revision stay as written. A second settlement is rejected. Settlement is written only when the window already has a pre-start lock, Kalshi has published both `floor_strike` and a positive `expiration_value`, and `now` is at or after close. A missed window is not settled.
+
+## Missed windows
+
+If the process is down at lock time, the window is recorded as `missed` once it is seen open, or within 20 minutes after it closes. The record says the process had no call on file, so none was invented. It is not a call, it is not revised, and it is not settled. A second pass does not write the miss again. Windows older than that lookback are left untouched, so startup does not mark the settled history.
+
+## Unattended runner
+
+From `money-os-desk`:
+
+```bash
+npm install
+npm test
+npm run btc15:loop
+```
+
+The process is a long-running Node loop. It does not open a screen. Each healthy pass starts about 8 seconds after the previous one (`LOOP_TICK_MS`), which is enough to land in the 60-second halfway checkpoint. The clock is the wall-clock `open_time` / `close_time` on each KXBTC15M market, so every 15-minute window is handled without a manual start.
+
+Each pass reads public Kraken `XBTUSD` and public Kalshi `KXBTC15M` (open, unopened, and settled). There is no API key and no order path. Those GETs time out after 8 seconds. A failed read is logged to stderr and the next wait doubles, up to 20 seconds, then returns to 8 seconds after a clean pass. The process keeps running.
+
+Stdout gets one line when the ledger changes, and nothing on an idle pass:
+
+```text
+2026-10-22T19:28:00.000Z LOCK KXBTC15M-… DOWN quality=NO DATA agreement=strong
+2026-10-22T19:37:30.000Z REVISE KXBTC15M-… FLIP DOWN -> UP quality=LIVE
+2026-10-22T19:45:10.000Z SETTLE KXBTC15M-… outcome=UP initialHit=false finalHit=true
+2026-10-22T19:15:08.000Z MISSED KXBTC15M-… no pre-start lock
+```
+
+The ledger path is `money-os-desk/data/btc15-calls.jsonl`, next to the script file, unless `BTC15_LEDGER` is an absolute path. That directory is gitignored. Each event is one JSON line, appended and fsynced. Earlier lines are never rewritten. On startup the file is loaded, so a restart still has the lock and can still do the halfway check. A torn last line is skipped. Run one process against a given file. Two writers can each append a lock for the same window.
+
+SIGINT and SIGTERM finish the current wait and exit 0.
+
+Keep it running on a Mac, from the `money-os-desk` directory. The log below is also gitignored because it sits in `data/`.
+
+`nohup`:
+
+```bash
+mkdir -p data
+nohup npm run btc15:loop >> data/btc15-loop.log 2>&1 &
+echo $! > data/btc15-loop.pid
+```
+
+Stop with `kill "$(cat data/btc15-loop.pid)"`.
+
+`pm2`:
+
+```bash
+npm install -g pm2
+pm2 start npm --name btc15-loop -- run btc15:loop
+pm2 save
+```
+
+`launchd`, saved as `~/Library/LaunchAgents/com.moneyos.btc15-loop.plist` (replace the two path strings):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.moneyos.btc15-loop</string>
+  <key>WorkingDirectory</key>
+  <string>/ABS/PATH/money-os-desk</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/npm</string>
+    <string>run</string>
+    <string>btc15:loop</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/ABS/PATH/money-os-desk/data/btc15-loop.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABS/PATH/money-os-desk/data/btc15-loop.log</string>
+</dict>
+</plist>
+```
+
+```bash
+mkdir -p data
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.moneyos.btc15-loop.plist
+```
+
+`npm` must be the same binary that can see this folder's `node_modules` (`which npm`).
 
 ## Data-quality flag
 

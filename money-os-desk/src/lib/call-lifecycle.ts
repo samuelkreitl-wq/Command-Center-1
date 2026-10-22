@@ -41,11 +41,27 @@ import {
   type CallRevision,
   type EvidenceCitation,
   type EvidenceRole,
+  type LedgerEvent,
   type PriceSource,
   type QualityParts,
   type StrikeSource,
   type WindowCallState,
 } from "./call-ledger";
+
+/** Lock the single next window only inside this lead before its open. */
+export const LOCK_LEAD_MS = 120_000;
+/** Healthy loop cadence. Short enough to land inside the 60s halfway checkpoint. */
+export const LOOP_TICK_MS = 8_000;
+/** Error backoff never grows past this, so a 60s checkpoint can still be hit. */
+export const LOOP_BACKOFF_CAP_MS = 20_000;
+/**
+ * A window with no pre-start lock is marked missed only while it is open,
+ * or this long after it closes. Older history is left alone.
+ */
+export const MISSED_LOOKBACK_MS = 20 * 60 * 1000;
+
+const MISSED_REASON =
+  "The process had no call on file when the window opened, so no call was invented.";
 
 export interface KrakenQuote {
   price: number;
@@ -59,6 +75,8 @@ export interface Btc15CallInput {
   closeTime: string;
   /** Kalshi floor_strike. Null while the market still says Target price TBD. */
   floorStrike: number | null;
+  /** Kalshi expiration_value. Null until the window is settled. Not a substitute strike. */
+  expirationValue?: number | null;
   spot: KrakenQuote | null;
   bars: Bar1m[];
   now: number;
@@ -457,29 +475,259 @@ export function callPhase(now: number, openMs: number): CallPhase {
   return "final";
 }
 
+export type CycleAction =
+  | {
+      kind: "lock";
+      at: number;
+      ticker: string;
+      windowId: string;
+      call: Direction;
+      quality: DataQuality;
+      agreement: Agreement;
+    }
+  | {
+      kind: "revision";
+      at: number;
+      ticker: string;
+      windowId: string;
+      effect: "keep" | "flip";
+      initialCall: Direction;
+      call: Direction;
+      quality: DataQuality;
+    }
+  | {
+      kind: "missed";
+      at: number;
+      ticker: string;
+      windowId: string;
+    }
+  | {
+      kind: "settlement";
+      at: number;
+      ticker: string;
+      windowId: string;
+      outcome: Direction;
+      initialHit: boolean;
+      finalHit: boolean;
+    };
+
+interface PreparedWindow {
+  openMs: number;
+  closeMs: number;
+  id: string;
+  input: Btc15CallInput;
+}
+
+function windowFlags(events: readonly LedgerEvent[], windowId: string): {
+  initial: boolean;
+  revision: boolean;
+  settlement: boolean;
+  missed: boolean;
+} {
+  const flags = { initial: false, revision: false, settlement: false, missed: false };
+  for (const event of events) {
+    if (event.windowId !== windowId) continue;
+    flags[event.type] = true;
+  }
+  return flags;
+}
+
+function prepareWindows(inputs: Btc15CallInput[]): PreparedWindow[] {
+  const byId = new Map<string, PreparedWindow>();
+  for (const raw of inputs) {
+    let prepared: ReturnType<typeof requireWindow>;
+    try {
+      prepared = requireWindow(raw);
+    } catch (error) {
+      if (error instanceof CallLifecycleError && error.code === "BAD_WINDOW") continue;
+      throw error;
+    }
+    const closeMs = Date.parse(prepared.input.closeTime);
+    const next: PreparedWindow = {
+      openMs: prepared.openMs,
+      closeMs,
+      id: prepared.id,
+      input: prepared.input,
+    };
+    const prev = byId.get(prepared.id);
+    if (!prev) {
+      byId.set(prepared.id, next);
+      continue;
+    }
+    prev.input = {
+      ...prev.input,
+      floorStrike: verifiedStrike(next.input.floorStrike) ?? prev.input.floorStrike,
+      expirationValue:
+        verifiedStrike(next.input.expirationValue) ??
+        verifiedStrike(prev.input.expirationValue) ??
+        null,
+      spot: next.input.spot ?? prev.input.spot,
+      bars: next.input.bars.length ? next.input.bars : prev.input.bars,
+      now: next.input.now,
+    };
+  }
+  return [...byId.values()].sort(
+    (a, b) => a.openMs - b.openMs || a.input.ticker.localeCompare(b.input.ticker)
+  );
+}
+
 /**
- * Lock a window that has not opened, and revise a window that is inside
- * its halfway checkpoint. Does nothing in the other phases, including
- * after the checkpoint, so a late poll cannot change the call.
+ * One pass over the windows the caller can see.
+ *
+ * The only future window that can be locked is the soonest one, and only
+ * when its open is within LOCK_LEAD_MS. Listing more future windows does
+ * not lock them. A window first seen after open is recorded as missed
+ * inside the lookback; it is not locked late. Halfway allows one
+ * keep-or-flip when a pre-start lock exists. Settlement is appended only
+ * after Kalshi publishes expiration_value for a window that was locked.
+ */
+export function runBtc15Cycle(
+  ledger: CallLedger,
+  inputs: Btc15CallInput[]
+): CycleAction[] {
+  const windows = prepareWindows(inputs);
+  let next: PreparedWindow | null = null;
+  for (const window of windows) {
+    if (window.openMs <= window.input.now) continue;
+    if (!next || window.openMs < next.openMs) next = window;
+  }
+
+  const actions: CycleAction[] = [];
+  for (const window of windows) {
+    const { input, openMs, closeMs, id } = window;
+    const lead = openMs - input.now;
+    let flags = windowFlags(ledger.all(), id);
+
+    const lockThis =
+      next != null &&
+      next.id === id &&
+      lead > 0 &&
+      lead <= LOCK_LEAD_MS &&
+      !flags.initial &&
+      !flags.missed;
+    if (lockThis) {
+      const before = ledger.all().length;
+      const state = lockInitialCall(ledger, input);
+      if (ledger.all().length > before) {
+        actions.push({
+          kind: "lock",
+          at: state.initial.at,
+          ticker: input.ticker,
+          windowId: id,
+          call: state.initial.call,
+          quality: state.initial.quality,
+          agreement: state.initial.agreement,
+        });
+      }
+      flags = windowFlags(ledger.all(), id);
+    }
+
+    if (callPhase(input.now, openMs) === "checkpoint" && flags.initial && !flags.revision) {
+      const before = ledger.all().length;
+      const state = reviseAtHalfway(ledger, input);
+      if (ledger.all().length > before && state.revision) {
+        actions.push({
+          kind: "revision",
+          at: state.revision.at,
+          ticker: input.ticker,
+          windowId: id,
+          effect: state.revision.effect,
+          initialCall: state.revision.initialCall,
+          call: state.revision.call,
+          quality: state.revision.quality,
+        });
+      }
+      flags = windowFlags(ledger.all(), id);
+    }
+
+    const opened = input.now >= openMs;
+    const inMissedScope = opened && input.now < closeMs + MISSED_LOOKBACK_MS;
+    if (opened && inMissedScope && !flags.initial && !flags.missed) {
+      ledger.append({
+        type: "missed",
+        windowId: id,
+        missed: {
+          at: input.now,
+          reason: MISSED_REASON,
+          openTime: input.openTime,
+          closeTime: input.closeTime,
+          ticker: input.ticker,
+        },
+      });
+      actions.push({
+        kind: "missed",
+        at: input.now,
+        ticker: input.ticker,
+        windowId: id,
+      });
+      flags = windowFlags(ledger.all(), id);
+    }
+
+    const expiration = verifiedStrike(input.expirationValue);
+    const strike = verifiedStrike(input.floorStrike);
+    if (
+      flags.initial &&
+      !flags.settlement &&
+      input.now >= closeMs &&
+      expiration != null &&
+      strike != null
+    ) {
+      const before = ledger.all().length;
+      const state = settleCall(
+        ledger,
+        input.ticker,
+        input.openTime,
+        input.closeTime,
+        expiration,
+        strike,
+        input.now
+      );
+      if (ledger.all().length > before && state.settlement) {
+        actions.push({
+          kind: "settlement",
+          at: state.settlement.at,
+          ticker: input.ticker,
+          windowId: id,
+          outcome: state.settlement.outcome,
+          initialHit: state.settlement.initialHit,
+          finalHit: state.settlement.finalHit,
+        });
+      }
+    }
+  }
+  return actions;
+}
+
+/**
+ * Same cycle as the unattended runner. A pre-start window is locked only
+ * when it is the single next window and its open is inside the lead.
+ * A late poll cannot invent a lock.
  */
 export function advanceBtc15Calls(
   ledger: CallLedger,
   inputs: Btc15CallInput[]
-): WindowCallState[] {
-  const out: WindowCallState[] = [];
-  for (const raw of inputs) {
-    const { openMs, id, input } = requireWindow(raw);
-    const phase = callPhase(input.now, openMs);
-    if (phase === "pre_start") {
-      out.push(lockInitialCall(ledger, input));
-    } else if (phase === "checkpoint") {
-      const existing = stateFor(ledger, id, input.ticker);
-      if (existing && !existing.revision) out.push(reviseAtHalfway(ledger, input));
-      else if (existing) out.push(existing);
-    } else {
-      const existing = stateFor(ledger, id, input.ticker);
-      if (existing) out.push(existing);
-    }
+): CycleAction[] {
+  return runBtc15Cycle(ledger, inputs);
+}
+
+/** Delay until the next loop tick. Errors back off; success returns to the base cadence. */
+export function nextTickDelay(prevDelayMs: number, hadError: boolean): number {
+  if (!hadError) return LOOP_TICK_MS;
+  const base = Math.max(prevDelayMs, LOOP_TICK_MS);
+  return Math.min(base * 2, LOOP_BACKOFF_CAP_MS);
+}
+
+/** One stdout line for a ledger change. No line when the cycle changes nothing. */
+export function formatActionLine(action: CycleAction): string {
+  const iso = new Date(action.at).toISOString();
+  switch (action.kind) {
+    case "lock":
+      return `${iso} LOCK ${action.ticker} ${action.call} quality=${action.quality} agreement=${action.agreement}`;
+    case "revision":
+      return `${iso} REVISE ${action.ticker} ${action.effect === "keep" ? "KEEP" : "FLIP"} ${action.initialCall} -> ${action.call} quality=${action.quality}`;
+    case "settlement":
+      return `${iso} SETTLE ${action.ticker} outcome=${action.outcome} initialHit=${action.initialHit} finalHit=${action.finalHit}`;
+    case "missed":
+      return `${iso} MISSED ${action.ticker} no pre-start lock`;
   }
-  return out;
 }
