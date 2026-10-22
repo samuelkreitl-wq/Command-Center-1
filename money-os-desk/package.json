@@ -1,0 +1,11 @@
+{
+  "name": "money-os-desk",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --import tsx --test src/lib/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  }
+}
