@@ -17,6 +17,8 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 | `kalshi.ts` | **Live** KXBTC15M markets + orderbook |
 | `feeds.ts` | Poll loop → buildSnapshot |
 | `sports-picks.ts` | Live sports recommendations (Dabble / prediction markets) |
+| `stake-rounding.ts` | **Arbitrage account survival** — human stake sizing + jitter for soft books |
+| `stake-rounding.example.ts` | Quick demo of 2-way arb stake rounding |
 
 ## Live feeds
 
@@ -31,6 +33,17 @@ const stop = startFeedLoop((b) => {
 ```
 
 5m: `SERIES_5M` is null until Kalshi lists a series.
+
+## Stake Rounding (Arbitrage Survival)
+
+Use for sportsbook arbing or any soft-book activity to reduce detection risk:
+
+```ts
+import { balanceTwoWayArb } from "./stake-rounding";
+
+const result = balanceTwoWayArb(2.45, 1.74, 1000, "soft", "soft");
+// Rounded, human-looking stakes with controlled residual risk
+```
 
 ## Rules
 
