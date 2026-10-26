@@ -4,6 +4,7 @@
  */
 
 import type { ContractWindow, MarketWindow } from "./types";
+import { AUTO_LOCK_LEAD_MS } from "./auto-lock";
 
 export const KALSHI_BASE =
   typeof window === "undefined"
@@ -57,6 +58,7 @@ export function mapMarketToContract(
     ticker: m.ticker,
     series: market === "15m" ? SERIES_15M : SERIES_5M || "UNKNOWN",
     market,
+    ...(m.open_time ? { openTime: m.open_time } : {}),
     strike,
     closeTime: m.close_time,
     yesAsk: dollars(m.yes_ask_dollars),
@@ -80,14 +82,25 @@ export async function fetchOpenMarkets(
 
 export async function fetchActive15mContract(): Promise<ContractWindow | null> {
   const markets = await fetchOpenMarkets(SERIES_15M);
+  const now = Date.now();
+  const candidates: ContractWindow[] = [];
   for (const m of markets) {
-    const now = Date.now();
-    if (Date.parse(m.close_time) <= now) continue;
-    if (m.open_time && Date.parse(m.open_time) > now) continue;
+    const openAt = m.open_time ? Date.parse(m.open_time) : Number.NEGATIVE_INFINITY;
+    const closeAt = Date.parse(m.close_time);
+    if (!Number.isFinite(closeAt) || closeAt <= now) continue;
     const c = mapMarketToContract(m, "15m");
-    if (c) return c;
+    if (c) candidates.push(c);
   }
-  return null;
+  // Prefer the currently open contract; otherwise return the nearest scheduled
+  // window so the desk can lock before its start instead of discovering it late.
+  return candidates.find((c) =>
+    c.openTime &&
+    Date.parse(c.openTime) > now &&
+    Date.parse(c.openTime) <= now + AUTO_LOCK_LEAD_MS
+  ) ??
+    candidates.find((c) => !c.openTime || Date.parse(c.openTime) <= now) ??
+    candidates.find((c) => c.openTime && Date.parse(c.openTime) > now) ??
+    null;
 }
 
 export async function fetchActive5mContract(): Promise<ContractWindow | null> {

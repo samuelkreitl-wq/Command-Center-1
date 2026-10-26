@@ -14,6 +14,7 @@
 - The basic React interface is in `money-os-desk/src/`; root Vite config points to that existing directory.
 - Public Kraken and Kalshi requests use fixed same-origin proxies `/api/kraken` and `/api/kalshi` in both development and build preview. No API keys or additional secrets required.
 - All positions are **paper only**. There is no real order execution.
+- When a listed 15-minute contract provides an opening time, the desk automatically locks its opening call 30 seconds before the window starts. Keep the desk open with a fresh data feed; an opening lock is captured only once, with any later correction stored as a separate, reasoned revision.
 - Journal, paper trades and custom reference persist in this browser's localStorage only; they are not synced or backed up to a server.
 - Only the listed 15-minute series is supported. Missing/unavailable feeds must be displayed explicitly, never replaced with sample market data.
 - Settlement is manual, after expiry, against the recorded strike. The user supplies the final price; Kraken spot is not the official Kalshi settlement index (Kalshi uses a CF Benchmarks average).

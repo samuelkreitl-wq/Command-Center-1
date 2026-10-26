@@ -1,14 +1,16 @@
 import { test, expect, type Page } from "@playwright/test";
 
 // Explicit test fixtures only: the running application never uses sample data.
-async function mockFeeds(page: Page, outage = false) {
-  const close = new Date(Date.now() + 600000).toISOString();
+async function mockFeeds(page: Page, outage = false, opensInMs = -60000) {
+  const open = Date.now() + opensInMs;
+  const openTime = new Date(open).toISOString();
+  const close = new Date(open + 900000).toISOString();
   await page.route("**/api/kalshi/**", async (route) => {
     const book = route.request().url().includes("orderbook");
     await route.fulfill({ json: book
       ? { orderbook_fp: { yes_dollars: [["0.39", "2"]], no_dollars: [["0.59", "2"]] } }
       : { markets: [{ ticker: "TEST-BTC15M", event_ticker: "TEST", status: "active",
-          floor_strike: 80000, close_time: close, yes_ask_dollars: "0.41", no_ask_dollars: "0.61" }] },
+          floor_strike: 80000, open_time: openTime, close_time: close, yes_ask_dollars: "0.41", no_ask_dollars: "0.61" }] },
     });
   });
   await page.route("**/api/kraken/**", async (route) => {
@@ -30,9 +32,16 @@ test("lock, paper entry, reference and records survive refresh", async ({ page }
   await mockFeeds(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Short-window desk" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Lock this call" })).toBeEnabled();
-  await page.getByRole("button", { name: "Lock this call" }).click();
+  await expect(page.locator(".lock-strip button")).toBeEnabled();
+  await page.locator(".lock-strip button").click();
   await expect(page.getByRole("button", { name: "Locked", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Record revision" })).toBeVisible();
+  const openingCall = (await page.locator(".lock-copy strong").first().textContent()) ?? "";
+  await page.getByLabel("Revised direction").selectOption(openingCall.includes("UP") ? "DOWN" : "UP");
+  await page.getByLabel("Reason for call revision").fill("Trend reversed after fresh bars");
+  await page.getByRole("button", { name: "Record revision" }).click();
+  await expect(page.locator(".revision-history li")).toHaveCount(1);
+  await expect(page.locator(".revision-history")).toContainText("Trend reversed after fresh bars");
   await page.getByLabel("Custom reference price").fill("79900");
   await page.getByRole("button", { name: "Save level" }).click();
   await expect(page.locator(".reference-value")).toHaveText("$79,900.00");
@@ -47,6 +56,7 @@ test("lock, paper entry, reference and records survive refresh", async ({ page }
   await page.getByRole("button", { name: /^Journal/ }).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await expect(page.locator("tbody tr")).toContainText("UP");
+  await expect(page.locator("tbody tr")).toContainText("Trend reversed after fresh bars");
   await page.getByRole("button", { name: /^Paper trade log/ }).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
   expect(browserErrors).toEqual([]);
@@ -85,7 +95,7 @@ test("feed errors disable actions without replacing prices with fake values", as
   await page.goto("/");
   await expect(page.getByRole("alert")).toContainText("Kraken HTTP 503");
   await expect(page.getByRole("button", { name: "Record paper YES" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Lock this call" })).toBeDisabled();
+  await expect(page.locator(".lock-strip button")).toBeDisabled();
   await expect(page.locator(".metric-value.large")).toHaveText("—");
 });
 
@@ -98,4 +108,24 @@ test("phone layout fits the viewport and can open its journal", async ({ page })
   expect(overflow).toBe(false);
   await page.getByRole("button", { name: /^Journal/ }).click();
   await expect(page.getByText("No directional calls have been locked yet.")).toBeVisible();
+});
+
+test("a future contract locks automatically in the 30-second pre-open window", async ({ page }) => {
+  await mockFeeds(page, false, 25_000);
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Locked", exact: true })).toBeDisabled({ timeout: 7000 });
+  await expect(page.locator(".lock-copy")).toContainText("PRE OPEN");
+  await page.getByRole("button", { name: /^Journal/ }).click();
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(page.locator("tbody tr")).toContainText("PRE OPEN");
+});
+
+test("a future call waits until its pre-open lock window", async ({ page }) => {
+  test.setTimeout(45000);
+  await mockFeeds(page, false, 60000);
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Scheduled" })).toBeDisabled();
+  await expect(page.locator(".lock-copy")).toContainText("Keep the desk open");
+  await page.waitForTimeout(32000);
+  await expect(page.getByRole("button", { name: "Locked", exact: true })).toBeDisabled({ timeout: 5000 });
 });

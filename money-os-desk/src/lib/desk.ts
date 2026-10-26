@@ -11,7 +11,7 @@ import type {
   TradeSide,
 } from "./types";
 import { runEngine, leanVsLevel, type Bar1m } from "./engine";
-import { lockCore, windowId } from "./signal-lock";
+import { lockCore, reviseCoreCall, windowId } from "./signal-lock";
 import {
   appendLock,
   appendTrade,
@@ -19,6 +19,7 @@ import {
   loadCustomRef,
   loadLocks,
   loadTrades,
+  reviseLock,
   saveCustomRef,
   settleLocksForWindow,
   settleTradesForWindow,
@@ -88,11 +89,21 @@ export function lockFromLive(
   contract: ContractWindow,
   spot: SpotTick | null,
   bars: Bar1m[],
-  now = Date.now()
+  now = Date.now(),
+  allowLate = false,
 ): CoreLock | null {
   const close = Date.parse(contract.closeTime);
   if (!Number.isFinite(close) || close <= now) {
     throw new Error("This market window is closed");
+  }
+  if (contract.openTime) {
+    const open = Date.parse(contract.openTime);
+    if (!Number.isFinite(open) || now < open - 30_000) {
+      throw new Error("The automatic call locks 30 seconds before this window opens");
+    }
+    if (now > open + 30_000 && !allowLate) {
+      throw new Error("The automatic opening-lock window was missed; mark any manual call as late");
+    }
   }
   if (!spot || !Number.isFinite(spot.price) || spot.price <= 0 ||
       now - spot.ts > 30000 || spot.ts > now + 5000) {
@@ -116,9 +127,48 @@ export function lockFromLive(
     action: eng.action,
     factors: eng.factors,
     lockedAt: now,
+    openTime: contract.openTime,
+    lockTiming: contract.openTime
+      ? now < Date.parse(contract.openTime) ? "PRE_OPEN"
+        : now <= Date.parse(contract.openTime) + 30_000 ? "OPENING" : "LATE"
+      : undefined,
   });
   appendLock(locked);
   return locked;
+}
+
+export function reviseLiveCall(
+  contract: ContractWindow,
+  revisedCall: "UP" | "DOWN",
+  reason: string,
+  spot: SpotTick | null,
+  bars: Bar1m[],
+  now = Date.now(),
+): CoreLock {
+  const close = Date.parse(contract.closeTime);
+  if (!Number.isFinite(close) || close <= now) throw new Error("This market window is closed");
+  if (contract.openTime && now < Date.parse(contract.openTime)) {
+    throw new Error("Wait until this window opens before revising its call");
+  }
+  if (!spot || !Number.isFinite(spot.price) || spot.price <= 0 ||
+      now - spot.ts > 30_000 || spot.ts > now + 5_000) {
+    throw new Error("A fresh spot price is required to revise a call");
+  }
+  const existing = loadLocks().find(
+    (row) => row.windowId === windowId(contract.ticker, contract.closeTime),
+  );
+  if (!existing) throw new Error("Lock a call before revising it");
+  const engine = runEngine(contract, spot, bars, now);
+  const revised = reviseCoreCall(
+    existing,
+    revisedCall,
+    reason,
+    spot.price,
+    engine?.confidence ?? 0,
+    now,
+  );
+  reviseLock(revised);
+  return revised;
 }
 
 export function placePaper(

@@ -10,6 +10,7 @@ export interface ContractWindow {
   ticker: string;
   series: string;
   market: MarketWindow;
+  openTime?: string; // ISO market/window start, supplied by Kalshi
   strike: number;
   closeTime: string; // ISO
   yesAsk: number; // 0–1
@@ -29,17 +30,32 @@ export interface CoreLock {
   lockedCall: Direction;
   confidence: number;
   lockedAt: number;
+  openTime?: string;
+  lockTiming?: "PRE_OPEN" | "OPENING" | "LATE";
   startPx: number;
   strike: number;
   closeTime: string;
   action: SignalAction;
   factors: string[];
+  revisions?: CallRevision[];
+  /** The final working call is scored separately from the immutable opening call. */
+  finalCall?: Direction;
+  finalHit?: boolean;
   /** set only on settle — never rewrite call fields */
   settledAt?: number;
   outcome?: Direction;
   endPx?: number;
   hit?: boolean;
   postmortem?: string;
+}
+
+export interface CallRevision {
+  previousCall: Direction;
+  revisedCall: Direction;
+  revisedAt: number;
+  reason: string;
+  observedPrice: number;
+  confidence: number;
 }
 
 export interface ScalpState {

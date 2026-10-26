@@ -8,14 +8,14 @@ export function evaluateHardStop(
   cooldownMs = DEFAULT_COOLDOWN_MS
 ): HardStopState {
   const settled = locks
-    .filter((r) => r.settledAt && r.hit != null)
+    .filter((r) => r.settledAt && (r.finalHit ?? r.hit) != null)
     .sort((a, b) => (b.settledAt! - a.settledAt!));
 
   const last = settled[0];
   if (!last) {
     return { active: false, reason: "No settled locks" };
   }
-  if (last.hit) {
+  if (last.finalHit ?? last.hit) {
     return { active: false, reason: "Last settle was a hit" };
   }
 

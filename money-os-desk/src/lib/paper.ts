@@ -26,6 +26,9 @@ export function openPaperTrade(opts: {
   if (!Number.isFinite(close) || close <= Date.now()) {
     throw new Error("This market window is closed");
   }
+  if (opts.contract.openTime && Date.now() < Date.parse(opts.contract.openTime)) {
+    throw new Error("This market window has not opened yet");
+  }
 
   const entry =
     opts.side === "YES" ? opts.contract.yesAsk : opts.contract.noAsk;

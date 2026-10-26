@@ -37,6 +37,21 @@ export function appendLock(lock: CoreLock): CoreLock[] {
   return rows;
 }
 
+export function reviseLock(updated: CoreLock): CoreLock[] {
+  const rows = loadLocks();
+  const index = rows.findIndex((row) => row.windowId === updated.windowId);
+  if (index < 0) throw new Error("The original call is missing from the journal");
+  // Preserve every opening-call field; only append the revision ledger and current call.
+  const existing = rows[index];
+  rows[index] = {
+    ...existing,
+    revisions: updated.revisions,
+    finalCall: updated.finalCall,
+  };
+  saveLocks(rows);
+  return rows;
+}
+
 export function settleLocksForWindow(
   windowId: string,
   endPx: number,
@@ -52,7 +67,7 @@ export function settleLocksForWindow(
 
 export function evidenceStats(rows: CoreLock[], target = 20) {
   const settled = rows.filter((r) => r.settledAt && r.hit != null);
-  const wins = settled.filter((r) => r.hit).length;
+  const wins = settled.filter((r) => r.finalHit ?? r.hit).length;
   return {
     settled: settled.length,
     target,

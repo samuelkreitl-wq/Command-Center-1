@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { buildSnapshot, listJournal, listTradeLog, lockFromLive, placePaper, setCustomReference, settleWindow } from "./lib/desk";
+import { buildSnapshot, listJournal, listTradeLog, lockFromLive, placePaper, reviseLiveCall, setCustomReference, settleWindow } from "./lib/desk";
+import { isAutoLockDue } from "./lib/auto-lock";
 import { pollDeskFeeds } from "./lib/feeds";
 import type { FeedBundle } from "./lib/feeds";
-import type { ContractWindow, CoreLock, PaperTrade, TradeSide } from "./lib/types";
+import type { ContractWindow, CoreLock, Direction, PaperTrade, TradeSide } from "./lib/types";
 
 type Tab = "desk" | "journal" | "trades";
 
@@ -54,9 +55,13 @@ function App() {
   const [settlementWindowId, setSettlementWindowId] = useState("");
   const [finalPrice, setFinalPrice] = useState("");
   const [settleError, setSettleError] = useState("");
+  const [revisionReason, setRevisionReason] = useState("");
+  const [revisionDirection, setRevisionDirection] = useState<Direction>("UP");
+  const [revisionError, setRevisionError] = useState("");
   const [now, setNow] = useState(Date.now());
   const refreshInFlight = useRef(false);
   const mounted = useRef(false);
+  const autoLockAttempts = useRef(new Set<string>());
 
   const syncLocalRows = useCallback(() => {
     setJournal(listJournal().slice().sort((a, b) => b.lockedAt - a.lockedAt));
@@ -102,9 +107,13 @@ function App() {
     [bundle, now],
   );
   const contract = bundle?.contract ?? null;
-  const actionable = validContract(contract) && isFreshSpot(bundle);
+  const actionable = validContract(contract) &&
+    (!contract?.openTime || Date.parse(contract.openTime) <= now) &&
+    isFreshSpot(bundle);
   const lock = current?.coreLock ?? null;
   const activeLock = lock && !lock.settledAt;
+  const currentLockedCall = lock?.revisions?.at(-1)?.revisedCall ?? lock?.lockedCall ?? null;
+  const lockReady = validContract(contract) && isFreshSpot(bundle);
   const quote = contract ? (side === "YES" ? contract.yesAsk : contract.noAsk) : NaN;
   const quoteValid = validQuote(quote);
   const sizeNumber = Number(size);
@@ -121,14 +130,60 @@ function App() {
     void refresh(false);
   };
 
-  const onLock = () => {
-    if (!contract || !actionable || activeLock || !current?.liveCall) return;
+  useEffect(() => {
+    if (!contract || !bundle || !lockReady || !isAutoLockDue(contract, now)) return;
+    const id = `${contract.ticker}::${contract.closeTime}`;
+    if (autoLockAttempts.current.has(id) || listJournal().some((row) => row.windowId === id)) return;
+    autoLockAttempts.current.add(id);
     try {
-      const saved = lockFromLive(contract, bundle?.spot ?? null, bundle?.bars ?? []);
+      const saved = lockFromLive(contract, bundle.spot, bundle.bars, now);
+      if (!saved) {
+        autoLockAttempts.current.delete(id);
+        return;
+      }
+      syncLocalRows();
+      setBundle((previous) => previous?.contract?.ticker === contract.ticker
+        ? { ...previous, snapshot: buildSnapshot(previous.contract, previous.spot, previous.bars) }
+        : previous);
+      setErrors((previous) => previous.filter((message) => !message.startsWith("Auto-lock:")));
+    } catch (error) {
+      setErrors((previous) => [
+        ...previous.filter((message) => !message.startsWith("Auto-lock:")),
+        `Auto-lock: ${error instanceof Error ? error.message : String(error)}`,
+      ]);
+    }
+  }, [contract, bundle, lockReady, now, syncLocalRows]);
+
+  const onLock = () => {
+    if (!contract || !lockReady || !current?.liveCall || lock) return;
+    if (contract.openTime && Date.parse(contract.openTime) > now && !isAutoLockDue(contract, now)) return;
+    try {
+      const saved = lockFromLive(contract, bundle?.spot ?? null, bundle?.bars ?? [], now, true);
       if (!saved) throw new Error("The live signal is not complete enough to lock.");
+      setRevisionDirection(saved.lockedCall === "UP" ? "DOWN" : "UP");
       updateSnapshotFromLocal();
     } catch (error) {
       withErrorRefresh(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const onRevise = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setRevisionError("");
+    if (!contract || !bundle?.spot || !activeLock || !actionable) {
+      setRevisionError("A live, open window and fresh spot price are required.");
+      return;
+    }
+    try {
+      reviseLiveCall(contract, revisionDirection, revisionReason, bundle.spot, bundle.bars, now);
+      setRevisionReason("");
+      setRevisionDirection(revisionDirection === "UP" ? "DOWN" : "UP");
+      syncLocalRows();
+      setBundle((previous) => previous
+        ? { ...previous, snapshot: buildSnapshot(previous.contract, previous.spot, previous.bars) }
+        : previous);
+    } catch (error) {
+      setRevisionError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -215,6 +270,12 @@ function App() {
 
   const feedOnline = !!bundle && !displayErrors.length && isFreshSpot(bundle);
 
+  useEffect(() => {
+    if (currentLockedCall) {
+      setRevisionDirection(currentLockedCall === "UP" ? "DOWN" : "UP");
+    }
+  }, [currentLockedCall]);
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -257,7 +318,7 @@ function App() {
                 <div className="panel-head"><div><div className="panel-title">Active 15-minute window</div><div className="panel-kicker">Contract terms · live market</div></div><span className="window-badge">BTC / 15M</span></div>
                 {contract ? <>
                   <div className="contract-body">
-                    <div className="contract-name-row"><div><div className="contract-name">Bitcoin above or below strike</div><div className="ticker">{contract.ticker}</div></div><div className="subtle-label">{validContract(contract) ? `CLOSES IN ${minutesText(contract.closeTime)}` : "WINDOW EXPIRED"}</div></div>
+                    <div className="contract-name-row"><div><div className="contract-name">Bitcoin above or below strike</div><div className="ticker">{contract.ticker}</div></div><div className="subtle-label">{!validContract(contract) ? "WINDOW EXPIRED" : contract.openTime && Date.parse(contract.openTime) > now ? `OPENS IN ${minutesText(contract.openTime)}` : `CLOSES IN ${minutesText(contract.closeTime)}`}</div></div>
                     <div className="contract-metrics">
                       <div className="metric"><div className="metric-label">Live spot</div><div className="metric-value large">{bundle?.spot ? money(bundle.spot.price) : "—"}</div></div>
                       <div className="metric"><div className="metric-label">Strike</div><div className="metric-value">{money(contract.strike)}</div></div>
@@ -279,7 +340,17 @@ function App() {
                 </div> : <div className="placeholder">Signal unavailable until live inputs support a valid read.</div>}
                 {current?.hardStop.active && <div style={{ padding: "0 20px 15px" }}><div className="hard-stop"><strong>Hard stop active</strong>{current.hardStop.reason}{current.hardStop.until ? ` · until ${dateTime(current.hardStop.until)}` : ""}</div></div>}
                 {!actionable && <div className="data-note" style={{ padding: "0 20px 14px" }}>Live read is unavailable or out of date. New calls and paper entries are disabled.</div>}
-                <div className={`lock-strip ${activeLock ? "locked" : ""}`}><div className="lock-copy"><strong>{activeLock ? `Locked ${lock.lockedCall} · ${lock.confidence}% · ${dateTime(lock.lockedAt)}` : "Immutable core lock"}</strong>{activeLock ? "This window's original directional call cannot be edited." : "Record the live call once for this contract window."}</div><button className={activeLock ? "button-secondary" : "button-primary"} onClick={onLock} disabled={!actionable || !current?.liveCall || !!lock}>{lock ? "Locked" : "Lock this call"}</button></div>
+                <div className={`lock-strip ${activeLock ? "locked" : ""}`}><div className="lock-copy"><strong>{activeLock ? `Opening call ${lock.lockedCall} · ${lock.confidence}% · ${dateTime(lock.lockedAt)}${lock.lockTiming ? ` · ${lock.lockTiming.replace("_", " ")}` : ""}` : contract?.openTime ? "Automatic core lock · 30 seconds before open" : "Immutable core lock"}</strong>{activeLock ? `Current answer: ${currentLockedCall}${lock.revisions?.length ? ` · revised ${lock.revisions.length} time${lock.revisions.length === 1 ? "" : "s"}` : ""}. The opening call remains in the journal.` : contract?.openTime && Date.parse(contract.openTime) > now && !isAutoLockDue(contract, now) ? `Scheduled for ${dateTime(Date.parse(contract.openTime) - 30_000)}. Keep the desk open and connected for automatic locking.` : contract?.openTime && now > Date.parse(contract.openTime) + 30_000 ? "The opening lock was missed. You can record a clearly marked late call." : "Record the live call once for this contract window."}</div><button className={activeLock ? "button-secondary" : "button-primary"} onClick={onLock} disabled={!lockReady || !current?.liveCall || !!lock || (!!contract?.openTime && Date.parse(contract.openTime) > now && !isAutoLockDue(contract, now))}>{lock ? "Locked" : contract?.openTime && Date.parse(contract.openTime) > now && !isAutoLockDue(contract, now) ? "Scheduled" : contract?.openTime && now > Date.parse(contract.openTime) + 30_000 ? "Lock late" : "Lock this call"}</button></div>
+                {activeLock && <div className="revision-panel">
+                  <div><strong>Correct this call during the window</strong><span>The opening call stays unchanged. Revisions are timestamped; final accuracy uses the latest call.</span></div>
+                  <form className="revision-form" onSubmit={onRevise}>
+                    <label><span className="size-label">Revised direction</span><select className="input" aria-label="Revised direction" value={revisionDirection} onChange={(event) => setRevisionDirection(event.target.value as Direction)}><option value="UP">UP</option><option value="DOWN">DOWN</option></select></label>
+                    <label className="revision-reason"><span className="size-label">Why are you changing it?</span><input className="input" aria-label="Reason for call revision" value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="Brief reason for this correction" maxLength={240} /></label>
+                    <button className="button-secondary" type="submit" disabled={!actionable || !isFreshSpot(bundle) || !!lock?.settledAt}>Record revision</button>
+                  </form>
+                  {revisionError && <p className="form-error" role="alert">{revisionError}</p>}
+                  {!!lock.revisions?.length && <ol className="revision-history">{lock.revisions.map((revision, index) => <li key={`${revision.revisedAt}-${index}`}><strong>{revision.previousCall} → {revision.revisedCall}</strong><span>{dateTime(revision.revisedAt)} · {revision.confidence}% · {money(revision.observedPrice)}</span><p>{revision.reason}</p></li>)}</ol>}
+                </div>}
               </section>
 
               <section className="panel">
@@ -334,7 +405,7 @@ function App() {
 
         {tab === "journal" && <section className="panel table-panel reveal">
           <div className="history-heading"><div><div className="panel-title">Directional journal</div><div className="panel-kicker">Immutable calls · browser-local records</div></div><button className="button-secondary" onClick={() => { syncLocalRows(); void refresh(true); }}>Refresh records</button></div>
-          {journal.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No directional calls have been locked yet.<br />A call recorded on the desk will appear here and cannot be rewritten.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Locked at</th><th>Call</th><th>Confidence</th><th>Start spot</th><th>Strike</th><th>Outcome</th><th>Result</th></tr></thead><tbody>{journal.map((row) => <tr key={row.windowId}><td className="table-primary">{row.ticker}<br /><span style={{ color: "#8a958e" }}>{dateTime(row.closeTime)}</span></td><td>{dateTime(row.lockedAt)}</td><td className={row.lockedCall === "UP" ? "result-good" : "result-bad"}>{row.lockedCall}</td><td>{row.confidence}%</td><td>{money(row.startPx)}</td><td>{money(row.strike)}</td><td>{row.outcome ?? (row.settledAt ? "—" : "Pending")}</td><td className={row.hit === true ? "result-good" : row.hit === false ? "result-bad" : ""}>{row.hit == null ? "—" : row.hit ? "Correct" : "Miss"}</td></tr>)}</tbody></table></div>}
+          {journal.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No directional calls have been locked yet.<br />The desk automatically locks 30 seconds before a listed window opens.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Locked at</th><th>Timing</th><th>Opening call</th><th>Current call</th><th>Confidence</th><th>Start spot</th><th>Strike</th><th>Outcome</th><th>Opening result</th><th>Final result</th><th>Revisions</th></tr></thead><tbody>{journal.map((row) => { const finalCall = row.revisions?.at(-1)?.revisedCall ?? row.lockedCall; const finalHit = row.finalHit ?? row.hit; return <tr key={row.windowId}><td className="table-primary">{row.ticker}<br /><span style={{ color: "#8a958e" }}>{dateTime(row.closeTime)}</span></td><td>{dateTime(row.lockedAt)}</td><td>{row.lockTiming?.replace("_", " ") ?? "MANUAL"}</td><td className={row.lockedCall === "UP" ? "result-good" : "result-bad"}>{row.lockedCall}</td><td className={finalCall === "UP" ? "result-good" : "result-bad"}>{finalCall}</td><td>{row.confidence}%</td><td>{money(row.startPx)}</td><td>{money(row.strike)}</td><td>{row.outcome ?? (row.settledAt ? "—" : "Pending")}</td><td className={row.hit === true ? "result-good" : row.hit === false ? "result-bad" : ""}>{row.hit == null ? "—" : row.hit ? "Correct" : "Miss"}</td><td className={finalHit === true ? "result-good" : finalHit === false ? "result-bad" : ""}>{finalHit == null ? "—" : finalHit ? "Correct" : "Miss"}</td><td>{row.revisions?.length ?? 0}{row.revisions?.map((revision, index) => <div key={index} className="revision-table-note">{dateTime(revision.revisedAt)}: {revision.previousCall} → {revision.revisedCall}<br />{revision.reason}</div>)}</td></tr>; })}</tbody></table></div>}
           <div className="data-note" style={{ padding: "14px 20px" }}>Saved to local browser storage only. Clearing browser data removes this journal.</div>
         </section>}
 
