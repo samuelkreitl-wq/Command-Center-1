@@ -7,6 +7,7 @@
 - `npm run build` checks TypeScript and builds `dist/`; `npm start` serves the build on port 5000.
 - `npm test` checks core lock immutability, paper trades, settlement, hard-stop, references and feed mapping.
 - `npm run test:browser` checks the main UI flows with explicit test-only feed fixtures. Start the app first. Uses Replit's Chromium (or set `CHROMIUM_PATH`).
+- After merges, `scripts/post-merge.sh` installs the locked dependencies with `npm ci` and runs the build. Replit then reconciles the workflows.
 
 ## Structure and data
 - The imported TypeScript modules remain in `money-os-desk/src/lib/`.
