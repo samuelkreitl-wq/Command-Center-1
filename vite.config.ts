@@ -18,9 +18,17 @@ const proxy = {
   },
 };
 
+const allowedHosts = [
+  process.env.REPLIT_DEV_DOMAIN,
+  ...(process.env.REPLIT_DOMAINS ?? "").split(","),
+]
+  .filter((host): host is string => typeof host === "string")
+  .map((host) => host.trim())
+  .filter((host) => host.length > 0);
+
 export default defineConfig({
   root: "money-os-desk",
-  server: { host: "0.0.0.0", port: 5000, strictPort: true, allowedHosts: true, proxy },
-  preview: { host: "0.0.0.0", port: 5000, strictPort: true, allowedHosts: true, proxy },
+  server: { host: "0.0.0.0", port: 5000, strictPort: true, allowedHosts, proxy },
+  preview: { host: "0.0.0.0", port: 5000, strictPort: true, allowedHosts, proxy },
   build: { outDir: "../dist", emptyOutDir: true },
 });
