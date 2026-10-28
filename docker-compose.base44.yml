@@ -1,0 +1,57 @@
+# Base44 sandbox runbook for the Money OS Desk repo.
+#
+# The repository is a TypeScript library (money-os-desk/src/lib) with no app of its
+# own, so this file runs the minimal dev harness in dev/ that exercises the library's
+# live feed loop and serves the desk snapshot on host port 3000.
+#
+# Everything here runs FROM THE CLONED SOURCE (node:22 + bind mount + tsx watch), so
+# edits to the server, the harness page, or the library show up without an image build.
+# All feeds are public and key-free, so no secrets are required.
+
+name: command-center-money-os-desk
+
+services:
+  desk:
+    image: node:22
+    working_dir: /app
+    restart: on-failure
+    ports:
+      - "3000:3000"
+    environment:
+      # Passed through from the platform (never hardcoded) for sandbox-gated behavior.
+      - BASE44_PREVIEW_MODE
+      - PORT=3000
+      - HOST=0.0.0.0
+      - MARKET=15m
+      - POLL_INTERVAL_MS=8000
+    volumes:
+      - ./:/app
+      # Keeps installed dependencies out of the repo checkout.
+      - desk-node-modules:/app/node_modules
+    command:
+      - sh
+      - -ec
+      - |
+        if [ -f package-lock.json ]; then
+          npm ci --no-audit --no-fund
+        else
+          npm install --no-audit --no-fund
+        fi
+        exec npx tsx watch dev/server.ts
+    healthcheck:
+      # Probes the harness page AND the snapshot API; prints which one failed.
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "Promise.all([fetch('http://127.0.0.1:3000/'),fetch('http://127.0.0.1:3000/api/snapshot')]).then(function(rs){var bad=rs.map(function(r,i){return [i?'api':'page',r.ok]}).filter(function(x){return !x[1]}).map(function(x){return x[0]});if(bad.length){console.error('unhealthy: '+bad.join(', '));process.exit(1)}console.log('ok');process.exit(0)}).catch(function(e){console.error('unhealthy: '+e.message);process.exit(1)})"
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 90s
+    labels:
+      base44.project: "Money OS Desk"
+      base44.kind: "web"
+      base44.port: "3000"
+
+volumes:
+  desk-node-modules:

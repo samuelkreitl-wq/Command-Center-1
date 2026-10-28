@@ -1,0 +1,17 @@
+{
+  "name": "command-center-money-os-desk",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Money OS / BTC15 desk library plus a local read-only dev harness",
+  "scripts": {
+    "dev": "tsx watch dev/server.ts",
+    "start": "tsx dev/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

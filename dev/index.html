@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Money OS Desk — live snapshot</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0e13;
+        --panel: #141922;
+        --line: #232b38;
+        --ink: #e8edf5;
+        --muted: #8b97a8;
+        --up: #35c48a;
+        --down: #ef6a6a;
+        --watch: #d8a94a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px 20px 48px;
+        background: var(--bg);
+        color: var(--ink);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      header { max-width: 980px; margin: 0 auto 20px; }
+      h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: 0.2px; }
+      .sub { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+      .meta { margin: 0; font-size: 12px; color: var(--muted); }
+      .meta b { color: var(--ink); font-weight: 600; }
+      .grid {
+        max-width: 980px;
+        margin: 0 auto;
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px 15px;
+      }
+      .card h2 {
+        margin: 0 0 10px;
+        font-size: 11px;
+        letter-spacing: 0.9px;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .big { font-size: 26px; font-weight: 600; letter-spacing: -0.4px; }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 3px 0;
+        font-size: 13px;
+      }
+      .row span:first-child { color: var(--muted); }
+      .row span:last-child { text-align: right; }
+      .full { grid-column: 1 / -1; }
+      .up { color: var(--up); }
+      .down { color: var(--down); }
+      .watch { color: var(--watch); }
+      ul { margin: 0; padding-left: 18px; }
+      li { font-size: 13px; padding: 2px 0; }
+      .errors li { color: var(--down); }
+      .ok { color: var(--muted); font-size: 13px; }
+      .muted { color: var(--muted); }
+      .pill {
+        display: inline-block;
+        padding: 2px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 11px;
+        letter-spacing: 0.4px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Money OS Desk — BTC15 live snapshot</h1>
+      <p class="sub">
+        Kraken spot + 1m OHLC · Kalshi <code>KXBTC15M</code> contract · Crypto Fear &amp; Greed.
+        Read-only dev view of <code>money-os-desk/src/lib</code>.
+      </p>
+      <p class="meta" id="meta">connecting…</p>
+    </header>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Spot</h2>
+        <div class="big" id="spot">—</div>
+        <div class="row"><span>Source</span><span id="spot-src">—</span></div>
+        <div class="row"><span>1m bars</span><span id="bars">—</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Kalshi contract</h2>
+        <div class="big" id="strike">—</div>
+        <div class="row"><span>Ticker</span><span id="ticker">—</span></div>
+        <div class="row"><span>Distance to strike</span><span id="distance">—</span></div>
+        <div class="row"><span>Minutes left</span><span id="minutes">—</span></div>
+        <div class="row"><span>YES / NO ask</span><span id="asks">—</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Desk call</h2>
+        <div class="big" id="action">—</div>
+        <div class="row"><span>Lean vs strike</span><span id="lean">—</span></div>
+        <div class="row"><span>Engine call</span><span id="call">—</span></div>
+        <div class="row"><span>Confidence</span><span id="confidence">—</span></div>
+        <div class="row"><span>Why</span><span id="why">—</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Fear &amp; Greed</h2>
+        <div class="big" id="fng">—</div>
+        <div class="row"><span>Classification</span><span id="fng-class">—</span></div>
+        <div class="row"><span>Yesterday</span><span id="fng-yday">—</span></div>
+        <div class="row"><span>Last week</span><span id="fng-week">—</span></div>
+      </section>
+
+      <section class="card full">
+        <h2>Engine factors</h2>
+        <ul id="factors"><li class="ok">Waiting for the first poll…</li></ul>
+      </section>
+
+      <section class="card full">
+        <h2>Hard-stop / evidence</h2>
+        <div class="row"><span>Hard-stop</span><span id="hs">—</span></div>
+        <div class="row"><span>Settled locks (wins / rate)</span><span id="evidence">—</span></div>
+      </section>
+
+      <section class="card full">
+        <h2>Feed errors</h2>
+        <ul id="errors" class="errors"><li class="ok">None.</li></ul>
+      </section>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const num = (n, d = 2) =>
+        n == null || !Number.isFinite(Number(n)) ? "—" : Number(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+      const leanClass = (v) => (v === "UP" ? "up" : v === "DOWN" ? "down" : "muted");
+
+      function render(payload) {
+        const b = payload.latest;
+        const meta = $("meta");
+        if (!b) {
+          meta.textContent = "Waiting for the first poll…";
+          return;
+        }
+        const s = b.snapshot;
+        const c = s.contract;
+        const aged = Math.max(0, Math.round((Date.now() - b.polledAt) / 1000));
+        meta.innerHTML =
+          "Polls: <b>" + payload.polls + "</b> · last poll <b>" + aged + "s</b> ago · market <b>" +
+          (c ? c.market : "15m") + "</b> · " + new Date(b.polledAt).toLocaleTimeString();
+
+        $("spot").textContent = s.spot ? "$" + num(s.spot.price) : "no data";
+        $("spot-src").textContent = s.spot ? s.spot.source : "—";
+        $("bars").textContent = b.bars.length;
+
+        $("strike").textContent = c ? "$" + num(c.strike) : "no contract";
+        $("ticker").textContent = c ? c.ticker : "—";
+        $("distance").textContent = s.distanceToStrike == null ? "—" : num(s.distanceToStrike);
+        $("distance").className = leanClass(s.leanVsStrike);
+        $("minutes").textContent = s.minutesLeft == null ? "—" : num(s.minutesLeft, 1);
+        $("asks").textContent = c ? (c.yesAsk * 100).toFixed(0) + "¢ / " + (c.noAsk * 100).toFixed(0) + "¢" : "—";
+
+        $("action").textContent = s.action;
+        $("action").className = "big " + (s.action === "LEAN_YES" || s.action === "LEAN_NO" ? "up" : s.action === "NO_TRADE" ? "down" : "watch");
+        $("lean").textContent = s.leanVsStrike ?? "—";
+        $("lean").className = leanClass(s.leanVsStrike);
+        $("call").textContent = s.liveCall ?? "—";
+        $("call").className = leanClass(s.liveCall);
+        $("confidence").textContent = s.liveCall ? s.confidence + "%" : "—";
+        $("why").textContent = s.actionWhy;
+
+        const fng = s.fearGreed && s.fearGreed.current;
+        $("fng").textContent = fng ? fng.value : "—";
+        $("fng-class").textContent = fng ? fng.classification : "—";
+        $("fng-yday").textContent = s.fearGreed && s.fearGreed.yesterday ? s.fearGreed.yesterday.value : "—";
+        $("fng-week").textContent = s.fearGreed && s.fearGreed.lastWeek ? s.fearGreed.lastWeek.value : "—";
+
+        $("factors").innerHTML = s.factors.length
+          ? s.factors.map((f) => "<li>" + f + "</li>").join("")
+          : "<li class='ok'>No factors yet.</li>";
+
+        $("hs").textContent = (s.hardStop.active ? "ACTIVE — " : "clear — ") + s.hardStop.reason;
+        $("hs").className = s.hardStop.active ? "down" : "up";
+        $("evidence").textContent =
+          s.evidence.settled + " settled · " + s.evidence.wins + " wins · " + s.evidence.winRate + " (target " + s.evidence.target + ")";
+
+        $("errors").innerHTML = b.errors.length
+          ? b.errors.map((e) => "<li>" + e + "</li>").join("")
+          : "<li class='ok'>None.</li>";
+      }
+
+      async function tick() {
+        try {
+          const res = await fetch("/api/snapshot", { cache: "no-store" });
+          render(await res.json());
+        } catch (e) {
+          $("meta").textContent = "Snapshot request failed: " + e;
+        }
+      }
+
+      tick();
+      setInterval(tick, 4000);
+    </script>
+  </body>
+</html>
