@@ -6,8 +6,8 @@ System of record for Money OS / Kalshi short-window desk.
 
 See [`money-os-desk/`](./money-os-desk/) for:
 
-- Immutable core lock (UP/DOWN per window)
-- Heuristic engine (RSI/EMA/VWAP + book action)
+- BTC15 call locked before the window, one halfway revision (UP / DOWN / AT STRIKE)
+- Indicator evidence (RSI/EMA/VWAP/volume) that does not override the call
 - Paper YES/NO trades (not sent to Kalshi)
 - Hard-stop after miss
 - Journal + trade log (localStorage-ready)

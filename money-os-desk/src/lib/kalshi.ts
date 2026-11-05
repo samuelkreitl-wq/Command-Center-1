@@ -16,6 +16,7 @@ interface KalshiMarketRaw {
   event_ticker: string;
   status: string;
   floor_strike?: number;
+  strike_type?: string;
   close_time: string;
   open_time?: string;
   yes_ask_dollars?: string;
@@ -24,7 +25,55 @@ interface KalshiMarketRaw {
   no_bid_dollars?: string;
   title?: string;
   yes_sub_title?: string;
+  no_sub_title?: string;
+  expiration_value?: string;
   last_price_dollars?: string;
+}
+
+/**
+ * A listed KXBTC15M window, including ones whose strike is still TBD.
+ * floorStrike is null when Kalshi has not published floor_strike.
+ * That null is not a price. Callers must not fill it in.
+ */
+export interface Btc15ListedWindow {
+  ticker: string;
+  openTime: string;
+  closeTime: string;
+  floorStrike: number | null;
+  strikeType: string | null;
+  status: string;
+  yesSubTitle: string;
+  expirationValue: number | null;
+}
+
+export function publishedFloorStrike(
+  value: number | null | undefined
+): number | null {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export function listedWindowFromMarket(
+  m: KalshiMarketRaw
+): Btc15ListedWindow | null {
+  if (!m.ticker || !m.open_time || !m.close_time) return null;
+  const expiration = m.expiration_value == null || m.expiration_value === ""
+    ? null
+    : Number(m.expiration_value);
+  return {
+    ticker: m.ticker,
+    openTime: m.open_time,
+    closeTime: m.close_time,
+    floorStrike: publishedFloorStrike(m.floor_strike),
+    strikeType: m.strike_type ?? null,
+    status: m.status,
+    yesSubTitle: m.yes_sub_title ?? "",
+    expirationValue:
+      expiration != null && Number.isFinite(expiration) && expiration > 0
+        ? expiration
+        : null,
+  };
 }
 
 function dollars(s?: string): number {
@@ -98,6 +147,24 @@ export async function fetchActiveContract(
   return market === "5m"
     ? fetchActive5mContract()
     : fetchActive15mContract();
+}
+
+export type ListedWindowStatus = "open" | "unopened" | "settled";
+
+/** Public list that keeps windows whose floor_strike is not published yet. */
+export async function fetchListed15mWindows(
+  status: ListedWindowStatus
+): Promise<Btc15ListedWindow[]> {
+  const path = `/markets?series_ticker=${encodeURIComponent(
+    SERIES_15M
+  )}&status=${encodeURIComponent(status)}&limit=100`;
+  const data = (await getJson(path)) as { markets?: KalshiMarketRaw[] };
+  const windows = (data.markets ?? [])
+    .map((m) => listedWindowFromMarket(m))
+    .filter((m): m is Btc15ListedWindow => m != null);
+  return windows.sort(
+    (a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime()
+  );
 }
 
 /** Orderbook bids-only; implied asks from reciprocal side. */

@@ -93,7 +93,7 @@ export function settleCore(lock: CoreLock, endPx: number): CoreLock {
     endPx,
     hit,
     postmortem: hit
-      ? `HIT. ${lock.lockedCall} @ ${lock.confidence}%; ${lock.startPx} → ${endPx} vs strike ${lock.strike}`
-      : `MISS. Called ${lock.lockedCall} @ ${lock.confidence}%; ${lock.startPx} → ${endPx} vs strike ${lock.strike}`,
+      ? `HIT. ${lock.lockedCall}; ${lock.startPx} → ${endPx} vs strike ${lock.strike}`
+      : `MISS. Called ${lock.lockedCall}; ${lock.startPx} → ${endPx} vs strike ${lock.strike}`,
   };
 }
