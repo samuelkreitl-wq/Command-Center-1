@@ -37,7 +37,7 @@ export function appendLock(lock: CoreLock): CoreLock[] {
   return rows;
 }
 
-/** Replace one window row in place. Used for the official strike and the halfway change. */
+/** Replace one window row in place. Used when a strike posts and for the ten-minute change. */
 export function replaceLock(lock: CoreLock): CoreLock[] {
   const rows = loadLocks();
   const index = rows.findIndex((r) => r.windowId === lock.windowId);

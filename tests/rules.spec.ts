@@ -44,23 +44,12 @@ async function routeFeeds(
   });
 }
 
-test("an equal spot and strike reads AT STRIKE", async ({ page }) => {
-  const close = new Date(Date.now() + 10 * 60_000).toISOString();
-  await routeFeeds(page, {
-    last: "80000.00",
-    open: [{ ticker: "AT-STRIKE", event_ticker: "AT", status: "active", floor_strike: 80000, close_time: close, yes_ask_dollars: "0.50", no_ask_dollars: "0.50" }],
-  });
-  await page.goto("/");
-  await expect(page.getByTestId("directional-call")).toHaveText("AT STRIKE");
-  await expect(page.getByTestId("feed-status")).toContainText("LIVE FEED");
-});
-
-test("the next window locks before it opens, and the official strike does not change that call", async ({ page }) => {
+test("no official strike shows no call, then an exact posted strike locks AT STRIKE", async ({ page }) => {
   const now = Date.now();
-  const state = { posted: false };
+  const state = { strike: null as number | null };
   await page.route("**/api/kraken/**", async (route) => {
     const isOhlc = route.request().url().includes("OHLC");
-    await route.fulfill({ json: isOhlc ? ohlc(80100) : kraken("80100") });
+    await route.fulfill({ json: isOhlc ? ohlc(80100) : kraken("80100.00") });
   });
   await page.route("**/api/kalshi/**", async (route) => {
     if (route.request().url().includes("orderbook")) {
@@ -71,7 +60,7 @@ test("the next window locks before it opens, and the official strike does not ch
         ticker: "NEXT-WINDOW", event_ticker: "NEXT", status: "initialized",
         open_time: new Date(now + 5 * 60_000).toISOString(),
         close_time: new Date(now + 20 * 60_000).toISOString(),
-        ...(state.posted ? { floor_strike: 77000 } : {}),
+        ...(state.strike == null ? {} : { floor_strike: state.strike }),
         yes_ask_dollars: "0.0000", no_ask_dollars: "0.0000",
       }] } });
     }
@@ -84,20 +73,23 @@ test("the next window locks before it opens, and the official strike does not ch
     }] } });
   });
   await page.goto("/");
-  await expect(page.getByTestId("upcoming-call")).toHaveText("UP");
+  await expect(page.getByTestId("upcoming-call")).toHaveText("no call");
+  await expect(page.getByTestId("upcoming-strike")).toHaveText("—");
   await expect(page.getByTestId("directional-call")).toHaveText("MISSED");
   await expect(page.getByRole("button", { name: "Lock this call" })).toHaveCount(0);
-  state.posted = true;
+  state.strike = 80100;
   await page.getByRole("button", { name: "Refresh" }).click();
-  await expect(page.getByTestId("upcoming-call")).toHaveText("UP");
-  await expect(page.getByTestId("official-strike")).toContainText("$77,000.00");
+  await expect(page.getByTestId("upcoming-call")).toHaveText("AT STRIKE");
+  await expect(page.getByTestId("upcoming-strike")).toHaveText("$80,100.00");
+  await expect(page.getByTestId("feed-status")).toContainText("LIVE FEED");
 });
 
-test("one halfway change is kept and a second change stays refused", async ({ page }) => {
-  const now = Date.now();
-  const open = new Date(now - 8 * 60_000).toISOString();
-  const close = new Date(now + 7 * 60_000).toISOString();
-  const ticker = "HALF-WINDOW";
+test("one change is allowed on the ten-minute tick and then the call stays locked", async ({ page }) => {
+  const openMs = Date.parse("2026-11-07T00:00:00.000Z");
+  const open = new Date(openMs).toISOString();
+  const close = new Date(openMs + 15 * 60_000).toISOString();
+  const ticker = "TEN-WINDOW";
+  await page.clock.install({ time: openMs + 9 * 60_000 });
   await page.addInitScript(({ row }) => {
     if (!localStorage.getItem("moneyos.btc.journal.v1")) {
       localStorage.setItem("moneyos.btc.journal.v1", JSON.stringify([row]));
@@ -106,8 +98,8 @@ test("one halfway change is kept and a second change stays refused", async ({ pa
     row: {
       windowId: `${ticker}::${close}`,
       ticker, market: "15m", lockedCall: "UP", confidence: 62,
-      lockedAt: now - 8 * 60_000 - 30_000, startPx: 80100, strike: 80000,
-      closeTime: close, openTime: open, action: "WATCH", factors: ["Expected strike 80000.00 via posted-strike"],
+      lockedAt: openMs + 30_000, startPx: 80100, strike: 80000,
+      closeTime: close, openTime: open, action: "WATCH", factors: ["Official strike"],
     },
   });
   await routeFeeds(page, {
@@ -118,6 +110,8 @@ test("one halfway change is kept and a second change stays refused", async ({ pa
     }],
   });
   await page.goto("/");
+  await expect(page.getByTestId("revise-form")).toHaveCount(0);
+  await page.clock.fastForward(60_000);
   await expect(page.getByTestId("revise-form")).toBeVisible();
   await page.getByLabel("Revised call").selectOption("DOWN");
   await page.getByLabel("Change reason").fill("spot flipped");
@@ -127,6 +121,8 @@ test("one halfway change is kept and a second change stays refused", async ({ pa
   await page.getByLabel("Change reason").fill("second try");
   await page.getByRole("button", { name: "Save change" }).click();
   await expect(page.getByTestId("revision-refusal")).toContainText("Second change refused");
+  await page.clock.fastForward(8_000);
+  await expect(page.getByTestId("revise-form")).toHaveCount(0);
   await page.reload();
   await expect(page.getByTestId("revision-refusal")).toBeVisible();
   await expect(page.getByTestId("revise-form")).toHaveCount(0);

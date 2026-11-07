@@ -7,7 +7,9 @@ import type { Bar1m } from "./engine";
 import type { SpotTick } from "./types";
 import { pollKraken } from "./kraken";
 import { enrichContractQuotes, fetchActiveContract, fetchNext15mContract } from "./kalshi";
-import { buildSnapshot, maintainWindows } from "./desk";
+import { DESK_POLL_MS, buildSnapshot, maintainWindows } from "./desk";
+
+export { DESK_POLL_MS };
 
 export interface FeedBundle {
   contract: ContractWindow | null;
@@ -89,7 +91,7 @@ export function startFeedLoop(
   opts?: { market?: MarketWindow; intervalMs?: number }
 ): () => void {
   const market = opts?.market ?? "15m";
-  const intervalMs = opts?.intervalMs ?? 8000;
+  const intervalMs = opts?.intervalMs ?? DESK_POLL_MS;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
 

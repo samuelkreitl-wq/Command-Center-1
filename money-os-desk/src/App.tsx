@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { buildSnapshot, halfwayAt, listJournal, listTradeLog, lockFromLive, placePaper, reviseLockedCall, setCustomReference, settleWindow } from "./lib/desk";
-import { pollDeskFeeds } from "./lib/feeds";
+import { buildSnapshot, listJournal, listTradeLog, lockFromLive, placePaper, reviseLockedCall, setCustomReference, settleWindow, tenMinuteTick } from "./lib/desk";
+import { DESK_POLL_MS, pollDeskFeeds } from "./lib/feeds";
 import type { FeedBundle } from "./lib/feeds";
 import { windowId } from "./lib/signal-lock";
 import type { ContractWindow, CoreLock, Direction, PaperTrade, TradeSide } from "./lib/types";
@@ -93,7 +93,7 @@ function App() {
     mounted.current = true;
     syncLocalRows();
     void refresh(false);
-    const poll = setInterval(() => void refresh(false), 8000);
+    const poll = setInterval(() => void refresh(false), DESK_POLL_MS);
     const clock = setInterval(() => setNow(Date.now()), 1000);
     return () => {
       mounted.current = false;
@@ -171,13 +171,13 @@ function App() {
   };
 
   const expiries = useMemo(() => {
-    const grouped = new Map<string, { ticker: string; market: "15m" | "5m"; strike: number; closeTime: string; pending: number }>();
+    const grouped = new Map<string, { ticker: string; market: "15m" | "5m"; strike: number | null; closeTime: string; pending: number }>();
     [...journal.map((row) => ({ ...row, source: "lock" as const })), ...trades.map((row) => ({ ...row, source: "trade" as const }))].forEach((row) => {
       const derivedClose = row.source === "lock"
         ? row.closeTime
         : journal.find((entry) => entry.windowId === row.windowId)?.closeTime ?? row.windowId.split("::").slice(1).join("::");
       const existing = grouped.get(row.windowId) ?? { ticker: row.ticker, market: row.market, strike: row.strike, closeTime: derivedClose, pending: 0 };
-      if (!row.settledAt && !(row.source === "lock" && row.missed)) existing.pending += 1;
+      if (!row.settledAt && !(row.source === "lock" && (row.missed || row.awaitingStrike))) existing.pending += 1;
       grouped.set(row.windowId, existing);
     });
     return [...grouped.entries()]
@@ -222,21 +222,27 @@ function App() {
   const missed = !!lock?.missed;
   const feedFresh = !!bundle && !displayErrors.length && isFreshSpot(bundle);
   const feedLabel = loading ? "CONNECTING" : feedFresh ? "LIVE FEED" : "STALE";
-  const displayCall = missed ? "MISSED" : current?.liveCall ?? null;
+  const displayCall = missed ? "MISSED" : lock?.awaitingStrike ? "no call" : current?.liveCall ?? null;
   const upcoming = bundle?.upcoming ?? null;
   const upcomingLock = upcoming
     ? journal.find((row) => row.windowId === windowId(upcoming.ticker, upcoming.closeTime)) ?? null
     : null;
-  const half = lock ? halfwayAt(lock) : null;
+  const tick = lock ? tenMinuteTick(lock.openTime) : null;
   const closeMs = lock ? Date.parse(lock.closeTime) : NaN;
-  const canRevise = !!lock && !missed && !lock.revisionRefusal && half != null && now >= half && now < closeMs;
+  const canRevise = !!lock && !missed && !lock.awaitingStrike && lock.lockedCall != null && !lock.revisionRefusal && tick != null && now >= tick.start && now < tick.end && now < closeMs && isFreshSpot(bundle);
+  const upcomingCall = !upcomingLock || upcomingLock.awaitingStrike
+    ? "no call"
+    : upcomingLock.missed
+      ? "MISSED"
+      : upcomingLock.revisedCall ?? upcomingLock.lockedCall ?? "no call";
+  const upcomingStrike = upcoming?.strike != null && upcoming.strike > 0 ? money(upcoming.strike) : "—";
   const effectiveLocked = lock?.revisedCall ?? lock?.lockedCall ?? null;
   const onRevise = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setReviseError("");
     if (!lock) return;
     try {
-      reviseLockedCall(lock.windowId, reviseTo, reviseReason, now);
+      reviseLockedCall(lock.windowId, reviseTo, reviseReason, Date.now(), bundle?.spot ?? null);
       setReviseReason("");
       updateSnapshotFromLocal();
     } catch (error) {
@@ -290,7 +296,7 @@ function App() {
                     <div className="contract-name-row"><div><div className="contract-name">Bitcoin above or below strike</div><div className="ticker">{contract.ticker}</div></div><div className="subtle-label">{validContract(contract) ? `CLOSES IN ${minutesText(contract.closeTime)}` : "WINDOW EXPIRED"}</div></div>
                     <div className="contract-metrics">
                       <div className="metric"><div className="metric-label">{feedFresh ? "Live spot" : "Spot · STALE"}</div><div className="metric-value large">{isFreshSpot(bundle) ? money(bundle?.spot?.price) : "—"}</div></div>
-                      <div className="metric"><div className="metric-label">Strike</div><div className="metric-value">{money(contract.strike)}</div></div>
+                      <div className="metric"><div className="metric-label">Strike</div><div className="metric-value">{contract.strike != null && contract.strike > 0 ? money(contract.strike) : "—"}</div></div>
                       <div className="metric"><div className="metric-label">Contract close</div><div className="metric-value">{dateTime(contract.closeTime)}</div></div>
                     </div>
                     <div className="spot-row"><span className={`status-dot ${feedFresh ? "" : "offline"}`} /><strong>{isFreshSpot(bundle) ? money(bundle?.spot?.price) : "No spot tick"}</strong><span className="source-chip">{feedFresh ? (bundle?.spot?.source ?? "no source") : "STALE"}</span><span>{feedFresh && bundle?.spot ? `updated ${dateTime(bundle.spot.ts)}` : "STALE"}</span></div>
@@ -298,15 +304,14 @@ function App() {
                 </> : <div className="placeholder"><div className="placeholder-mark">—</div>No active 15-minute contract was returned by the live feed.<br />The desk will keep checking; no market terms are inferred.<br />Kraken spot: {isFreshSpot(bundle) ? money(bundle?.spot?.price) : "Unavailable"}</div>}
               </section>
               {upcoming && <section className="panel" data-testid="upcoming-window">
-                <div className="panel-head"><div><div className="panel-title">Next 15-minute window</div><div className="panel-kicker">Locked automatically before the open</div></div><span className="window-badge">NEXT</span></div>
+                <div className="panel-head"><div><div className="panel-title">Next 15-minute window</div><div className="panel-kicker">Official strike only</div></div><span className="window-badge">NEXT</span></div>
                 <div className="contract-body">
                   <div className="contract-name-row"><div><div className="contract-name">Upcoming contract</div><div className="ticker">{upcoming.ticker}</div></div><div className="subtle-label">{upcoming.openTime ? `OPENS ${dateTime(upcoming.openTime)}` : "OPEN TIME UNKNOWN"}</div></div>
                   <div className="contract-metrics">
-                    <div className="metric"><div className="metric-label">Expected strike</div><div className="metric-value" data-testid="expected-strike">{money(upcomingLock?.strike)}</div></div>
-                    <div className="metric"><div className="metric-label">Official strike</div><div className="metric-value" data-testid="official-strike">{upcomingLock?.officialStrike != null ? money(upcomingLock.officialStrike) : upcoming.strike != null ? money(upcoming.strike) : "Pending"}</div></div>
-                    <div className="metric"><div className="metric-label">Auto call</div><div className="metric-value" data-testid="upcoming-call">{upcomingLock?.missed ? "MISSED" : upcomingLock?.revisedCall ?? upcomingLock?.lockedCall ?? "Waiting"}</div></div>
+                    <div className="metric"><div className="metric-label">Official strike</div><div className="metric-value" data-testid="upcoming-strike">{upcomingStrike}</div></div>
+                    <div className="metric"><div className="metric-label">Call</div><div className="metric-value" data-testid="upcoming-call">{upcomingCall}</div></div>
                   </div>
-                  <div className="data-note">{upcomingLock?.missed ? "This window opened before a call was locked." : upcomingLock ? `Locked automatically · reference ${upcomingLock.expectedStrikeSource ?? "expected strike"}` : "Waiting for a fresh spot to lock a call."}</div>
+                  <div className="data-note">{upcomingCall === "no call" ? "No official floor_strike yet. No call and no strike." : upcomingCall === "MISSED" ? "The strike posted while this desk was not able to lock. No call was back-filled." : "Locked on the poll that first saw the official strike."}</div>
                 </div>
               </section>}
 
@@ -379,7 +384,7 @@ function App() {
 
         {tab === "journal" && <section className="panel table-panel reveal">
           <div className="history-heading"><div><div className="panel-title">Directional journal</div><div className="panel-kicker">Immutable calls · browser-local records</div></div><button className="button-secondary" onClick={() => { syncLocalRows(); void refresh(true); }}>Refresh records</button></div>
-          {journal.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No directional calls have been locked yet.<br />A call recorded on the desk will appear here and cannot be rewritten.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Locked at</th><th>Call</th><th>Confidence</th><th>Start spot</th><th>Strike</th><th>Outcome</th><th>Result</th></tr></thead><tbody>{journal.map((row) => <tr key={row.windowId}><td className="table-primary">{row.ticker}<br /><span style={{ color: "#8a958e" }}>{dateTime(row.closeTime)}</span></td><td>{dateTime(row.lockedAt)}</td><td className={row.missed ? "" : row.lockedCall === "UP" || row.lockedCall === "AT STRIKE" ? "result-good" : "result-bad"}>{row.missed ? "MISSED" : row.revisedCall ? `${row.lockedCall} → ${row.revisedCall}` : row.lockedCall}{row.revision ? <div>Reason: {row.revision.reason}</div> : null}{row.revisionRefusal ? <div>Second change refused</div> : null}</td><td>{row.confidence}%</td><td>{money(row.startPx)}</td><td>{money(row.strike)}</td><td>{row.outcome ?? (row.settledAt ? "—" : "Pending")}</td><td className={row.hit === true ? "result-good" : row.hit === false ? "result-bad" : ""}>{row.hit == null ? "—" : row.hit ? "Correct" : "Miss"}</td></tr>)}</tbody></table></div>}
+          {journal.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No directional calls have been locked yet.<br />A call recorded on the desk will appear here and cannot be rewritten.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Locked at</th><th>Call</th><th>Confidence</th><th>Start spot</th><th>Strike</th><th>Outcome</th><th>Result</th></tr></thead><tbody>{journal.map((row) => <tr key={row.windowId}><td className="table-primary">{row.ticker}<br /><span style={{ color: "#8a958e" }}>{dateTime(row.closeTime)}</span></td><td>{dateTime(row.lockedAt)}</td><td className={row.missed ? "" : row.lockedCall === "UP" || row.lockedCall === "AT STRIKE" ? "result-good" : "result-bad"}>{row.awaitingStrike ? "no call" : row.missed ? "MISSED" : row.revisedCall ? `${row.lockedCall} → ${row.revisedCall}` : row.lockedCall}{row.revision ? <div>Reason: {row.revision.reason}</div> : null}{row.revisionRefusal ? <div>Second change refused</div> : null}</td><td>{row.confidence}%</td><td>{row.awaitingStrike ? "—" : money(row.startPx)}</td><td>{row.awaitingStrike || row.strike == null ? "—" : money(row.strike)}</td><td>{row.outcome ?? (row.settledAt ? "—" : "Pending")}</td><td className={row.hit === true ? "result-good" : row.hit === false ? "result-bad" : ""}>{row.hit == null ? "—" : row.hit ? "Correct" : "Miss"}</td></tr>)}</tbody></table></div>}
           <div className="data-note" style={{ padding: "14px 20px" }}>Saved to local browser storage only. Clearing browser data removes this journal.</div>
         </section>}
 

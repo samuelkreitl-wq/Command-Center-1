@@ -84,7 +84,7 @@ export function requestOverride(
 
 /** Settle core once. Idempotent. Outcome = endPx >= strike → UP. A missed window has no call to settle. */
 export function settleCore(lock: CoreLock, endPx: number): CoreLock {
-  if (lock.settledAt || lock.missed || lock.lockedCall == null) return lock;
+  if (lock.settledAt || lock.missed || lock.lockedCall == null || lock.strike == null) return lock;
   const outcome: Direction = endPx >= lock.strike ? "UP" : "DOWN";
   const hit = outcome === lock.lockedCall;
   return {

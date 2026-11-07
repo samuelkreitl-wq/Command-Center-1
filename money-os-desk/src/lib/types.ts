@@ -1,7 +1,6 @@
 /** Money OS — Kalshi short-window desk types (Phase 1+2) */
 
 export type Direction = "UP" | "DOWN" | "AT STRIKE";
-export type ExpectedStrikeSource = "posted-strike" | "open-market" | "prior-settle" | "spot";
 export type MarketWindow = "15m" | "5m";
 export type SignalAction = "NO_TRADE" | "WATCH" | "LEAN_YES" | "LEAN_NO";
 export type TradeMode = "paper" | "live";
@@ -42,23 +41,22 @@ export interface CoreLock {
   windowId: string; // ticker + closeTime
   ticker: string;
   market: MarketWindow;
-  /** Null only when missed is true. A missed window has no call. */
+  /** Null when there is no call yet, or when the window was missed. */
   lockedCall: Direction | null;
   confidence: number;
   lockedAt: number;
   startPx: number;
-  /** Reference the call was locked against (expected strike, or the posted strike). */
-  strike: number;
+  /** Official floor_strike the call was locked against. Null while waiting, and when none was posted. */
+  strike: number | null;
   closeTime: string;
   openTime?: string;
   action: SignalAction;
   factors: string[];
-  /** Kalshi floor_strike once it exists. Recording it does not change lockedCall. */
-  officialStrike?: number;
-  expectedStrikeSource?: ExpectedStrikeSource;
-  /** Desk was not running before the open, so this window has no call. */
+  /** Seen before floor_strike existed. No call and no strike number. */
+  awaitingStrike?: boolean;
+  /** Strike posted while the desk was not running, or the spot was stale on the poll that first saw it. */
   missed?: boolean;
-  /** The one allowed halfway change. lockedCall stays the original. */
+  /** The one change made on the ten-minute tick. lockedCall stays the original. */
   revisedCall?: Direction;
   revision?: CallRevision;
   /** A second change was refused. It is not cleared and cannot be approved later. */

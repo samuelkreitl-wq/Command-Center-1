@@ -4,7 +4,7 @@ import { buildSnapshot, lockFromLive, placePaper, settleWindow, setCustomReferen
 import { loadLocks, loadTrades } from "./journal";
 import { openPaperTrade, settlePaperTrade } from "./paper";
 import { mapMarketToContract, mapScheduledMarket, fetchOrderbookAsks } from "./kalshi";
-import { chooseExpectedStrike, maintainWindows, reviseLockedCall } from "./desk";
+import { maintainWindows, reviseLockedCall } from "./desk";
 import type { ContractWindow } from "./types";
 
 const store = new Map<string, string>();
@@ -108,7 +108,7 @@ test("price exactly at the strike is AT STRIKE; above is UP and below is DOWN", 
   assert.equal(lockFromLive(down, { price: 79999.99, ts: Date.now(), source: "manual" }, [])?.lockedCall, "DOWN");
 });
 
-test("a null strike locks before the open and a later official strike does not change the call", () => {
+test("no official strike is no call; the posted strike locks immediately, including AT STRIKE", () => {
   const now = Date.now();
   const spot = { price: 80100, ts: now, source: "manual" as const };
   const active: ContractWindow = {
@@ -122,66 +122,101 @@ test("a null strike locks before the open and a later official strike does not c
     closeTime: new Date(now + 20 * 60_000).toISOString(),
     yesAsk: 0, noAsk: 0,
   };
-  assert.equal(chooseExpectedStrike({ ownStrike: null, openMarketStrike: 79000, priorSettle: null, spot: 80100 })?.source, "open-market");
-  assert.doesNotThrow(() => maintainWindows({ active, upcoming, spot, now }));
+  maintainWindows({ active, upcoming, spot, now });
   const next = loadLocks().find((row) => row.ticker === "NEXT");
-  assert.equal(next?.lockedCall, "UP");
-  assert.equal(next?.officialStrike, undefined);
-  assert.ok(next && next.lockedAt < Date.parse(upcoming.openTime!));
+  assert.equal(next?.awaitingStrike, true);
+  assert.equal(next?.lockedCall, null);
+  assert.equal(next?.strike, null);
   assert.equal(loadLocks().find((row) => row.ticker === "OPEN-NOW")?.missed, true);
   assert.equal(loadLocks().find((row) => row.ticker === "OPEN-NOW")?.lockedCall, null);
-  maintainWindows({ active, upcoming: { ...upcoming, strike: 81000 }, spot, now });
+  const exact: ContractWindow = {
+    ticker: "EXACT", series: "KXBTC15M", market: "15m", strike: null,
+    openTime: new Date(now + 40 * 60_000).toISOString(),
+    closeTime: new Date(now + 55 * 60_000).toISOString(),
+    yesAsk: 0, noAsk: 0,
+  };
+  maintainWindows({ active: null, upcoming: exact, spot, now });
+  assert.equal(loadLocks().find((row) => row.ticker === "EXACT")?.lockedCall, null);
+  maintainWindows({ active: null, upcoming: { ...exact, strike: 80100 }, spot, now });
+  const at = loadLocks().find((row) => row.ticker === "EXACT");
+  assert.equal(at?.lockedCall, "AT STRIKE");
+  assert.equal(at?.strike, 80100);
+  maintainWindows({ active, upcoming: { ...upcoming, strike: 80000 }, spot, now });
   const posted = loadLocks().find((row) => row.ticker === "NEXT");
   assert.equal(posted?.lockedCall, "UP");
-  assert.equal(posted?.revisedCall, undefined);
-  assert.equal(posted?.officialStrike, 81000);
+  assert.equal(posted?.strike, 80000);
+  assert.equal(posted?.awaitingStrike, false);
   const bare = mapScheduledMarket({
     ticker: "BARE", event_ticker: "BARE", status: "initialized",
     close_time: upcoming.closeTime, open_time: upcoming.openTime,
   }, "15m");
   assert.equal(bare?.strike, null);
-  const solo: ContractWindow = {
-    ticker: "SOLO", series: "KXBTC15M", market: "15m", strike: null,
-    openTime: new Date(now + 30 * 60_000).toISOString(),
-    closeTime: new Date(now + 45 * 60_000).toISOString(),
-    yesAsk: 0, noAsk: 0,
-  };
-  maintainWindows({ active: null, upcoming: solo, spot, now });
-  const soloLock = loadLocks().find((row) => row.ticker === "SOLO");
-  assert.equal(soloLock?.expectedStrikeSource, "spot");
-  assert.equal(soloLock?.lockedCall, "AT STRIKE");
-  assert.equal(soloLock?.strike, 80100);
 });
 
-test("one halfway change is saved with its reason; a second is refused and stays refused", () => {
-  const now = Date.now();
-  const open = new Date(now + 60_000).toISOString();
-  const close = new Date(now + 16 * 60_000).toISOString();
-  const upcoming: ContractWindow = {
-    ticker: "HALF", series: "KXBTC15M", market: "15m", strike: 80000,
+test("one change is saved on the ten-minute tick; a second and any later attempt stay refused", () => {
+  const openMs = Date.parse("2026-11-07T00:00:00.000Z");
+  const open = new Date(openMs).toISOString();
+  const close = new Date(openMs + 15 * 60_000).toISOString();
+  const waiting: ContractWindow = {
+    ticker: "HALF", series: "KXBTC15M", market: "15m", strike: null,
     openTime: open, closeTime: close, yesAsk: 0.4, noAsk: 0.6,
   };
+  const seenAt = openMs + 30_000;
+  const spot = { price: 80100, ts: seenAt, source: "manual" as const };
+  maintainWindows({ active: null, upcoming: waiting, spot, now: seenAt });
+  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.lockedCall, null);
+  const postedAt = openMs + 60_000;
   maintainWindows({
-    active: null, upcoming, spot: { price: 80100, ts: now, source: "manual" }, now,
+    active: null,
+    upcoming: { ...waiting, strike: 80000 },
+    spot: { price: 80100, ts: postedAt, source: "manual" },
+    now: postedAt,
   });
   const locked = loadLocks().find((row) => row.ticker === "HALF");
-  assert.ok(locked?.lockedCall);
-  const half = Date.parse(open) + (Date.parse(close) - Date.parse(open)) / 2;
-  assert.throws(() => reviseLockedCall(locked!.windowId, "DOWN", "too early", half - 1000), /halfway/);
+  assert.equal(locked?.lockedCall, "UP");
+  assert.equal(locked?.strike, 80000);
+  const tick = openMs + 10 * 60_000;
+  assert.throws(
+    () => reviseLockedCall(locked!.windowId, "DOWN", "too early", tick - 1, spot),
+    /ten-minute/,
+  );
   assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revision, undefined);
-  const changed = reviseLockedCall(locked!.windowId, "DOWN", "spot flipped", half + 10);
+  assert.throws(
+    () => reviseLockedCall(locked!.windowId, "DOWN", "stale", tick, { price: 80100, ts: tick - 31_000, source: "manual" }),
+    /stale/,
+  );
+  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revision, undefined);
+  const fresh = { price: 79900, ts: tick, source: "manual" as const };
+  const changed = reviseLockedCall(locked!.windowId, "DOWN", "spot flipped", tick, fresh);
   assert.equal(changed.lockedCall, "UP");
   assert.equal(changed.revisedCall, "DOWN");
   assert.equal(changed.revision?.reason, "spot flipped");
-  assert.throws(() => reviseLockedCall(locked!.windowId, "AT STRIKE", "again", half + 20), /second change is refused/);
+  assert.throws(
+    () => reviseLockedCall(locked!.windowId, "AT STRIKE", "again", tick + 1000, fresh),
+    /second change is refused/,
+  );
   const refused = loadLocks().find((row) => row.ticker === "HALF");
   assert.equal(refused?.revisedCall, "DOWN");
   assert.equal(refused?.revisionRefusal?.attempted, "AT STRIKE");
-  assert.equal(refused?.revisionRefusal?.reason, "again");
-  assert.throws(() => reviseLockedCall(locked!.windowId, "UP", "third", half + 30), /already refused/);
-  const still = loadLocks().find((row) => row.ticker === "HALF");
-  assert.equal(still?.revisedCall, "DOWN");
-  assert.equal(still?.revisionRefusal?.attempted, "AT STRIKE");
+  assert.throws(
+    () => reviseLockedCall(locked!.windowId, "UP", "third", tick + 2000, fresh),
+    /already refused/,
+  );
+  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revisionRefusal?.attempted, "AT STRIKE");
+  const lockedOnly = { ...locked!, revisedCall: undefined, revision: undefined, revisionRefusal: undefined };
+  localStorage.setItem("moneyos.btc.journal.v1", JSON.stringify([lockedOnly]));
+  assert.throws(
+    () => reviseLockedCall(locked!.windowId, "DOWN", "late", tick + 8000, fresh),
+    /locked after the ten-minute mark/,
+  );
+  const late = loadLocks().find((row) => row.ticker === "HALF");
+  assert.equal(late?.revisedCall, undefined);
+  assert.equal(late?.revisionRefusal?.reason, "late");
+  assert.throws(
+    () => reviseLockedCall(locked!.windowId, "UP", "later still", tick + 9000, fresh),
+    /already refused/,
+  );
+  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revisionRefusal?.reason, "late");
 });
 
 test("a window the desk missed is marked MISSED and is never back-filled", () => {
@@ -211,17 +246,36 @@ test("a window the desk missed is marked MISSED and is never back-filled", () =>
     closeTime: new Date(now + 15 * 60_000 + 10_000).toISOString(),
     yesAsk: 0, noAsk: 0,
   };
+  const openLate = Date.parse(upcoming.openTime!);
   maintainWindows({
-    active: null, upcoming, spot: { price: 80000, ts: now - 31_000, source: "manual" }, now,
+    active: null, upcoming, spot: { price: 80000, ts: openLate - 1000, source: "manual" }, now: openLate - 1000,
   });
-  assert.equal(loadLocks().find((row) => row.ticker === "LATE"), undefined);
-  const later = now + 11_000;
-  const opened: ContractWindow = { ...upcoming, strike: 80500 };
+  const waitingLate = loadLocks().find((row) => row.ticker === "LATE");
+  assert.equal(waitingLate?.awaitingStrike, true);
+  assert.equal(waitingLate?.lockedCall, null);
+  assert.equal(waitingLate?.strike, null);
+  const postedAt = openLate + 60_000;
   maintainWindows({
-    active: opened, upcoming: null, spot: { price: 81000, ts: later, source: "manual" }, now: later,
+    active: { ...upcoming, strike: 80500 }, upcoming: null,
+    spot: { price: 81000, ts: postedAt - 31_000, source: "manual" }, now: postedAt,
+  });
+  const stillWaiting = loadLocks().find((row) => row.ticker === "LATE");
+  assert.equal(stillWaiting?.awaitingStrike, true);
+  assert.equal(stillWaiting?.lockedCall, null);
+  const deadline = openLate + 5 * 60_000;
+  maintainWindows({
+    active: { ...upcoming, strike: 80500 }, upcoming: null,
+    spot: { price: 81000, ts: deadline, source: "manual" }, now: deadline,
   });
   const late = loadLocks().find((row) => row.ticker === "LATE");
   assert.equal(late?.missed, true);
   assert.equal(late?.lockedCall, null);
+  maintainWindows({
+    active: { ...upcoming, strike: 80500 }, upcoming: null,
+    spot: { price: 81000, ts: deadline + 1000, source: "manual" }, now: deadline + 1000,
+  });
+  const still = loadLocks().find((row) => row.ticker === "LATE");
+  assert.equal(still?.missed, true);
+  assert.equal(still?.lockedCall, null);
 });
 
