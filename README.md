@@ -13,3 +13,4 @@ See [`money-os-desk/`](./money-os-desk/) for:
 - Journal + trade log (localStorage-ready)
 
 Wire UI against `money-os-desk/src/lib/desk.ts`.
+

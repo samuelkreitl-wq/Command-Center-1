@@ -39,3 +39,4 @@ export function evaluateHardStop(
 export function cooldownForMarket(market: "15m" | "5m"): number {
   return market === "5m" ? 5 * 60 * 1000 : 15 * 60 * 1000;
 }
+

@@ -6,7 +6,9 @@
 import type { ContractWindow, MarketWindow } from "./types";
 
 export const KALSHI_BASE =
-  "https://api.elections.kalshi.com/trade-api/v2";
+  typeof window === "undefined"
+    ? "https://api.elections.kalshi.com/trade-api/v2"
+    : "/api/kalshi";
 
 export const SERIES_15M = "KXBTC15M";
 export const SERIES_5M: string | null = null;
@@ -35,7 +37,10 @@ function dollars(s?: string): number {
 
 async function getJson(path: string): Promise<unknown> {
   const url = path.startsWith("http") ? path : `${KALSHI_BASE}${path}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(15000),
+  });
   if (!res.ok) {
     throw new Error(`Kalshi HTTP ${res.status} ${url}`);
   }
@@ -76,6 +81,9 @@ export async function fetchOpenMarkets(
 export async function fetchActive15mContract(): Promise<ContractWindow | null> {
   const markets = await fetchOpenMarkets(SERIES_15M);
   for (const m of markets) {
+    const now = Date.now();
+    if (Date.parse(m.close_time) <= now) continue;
+    if (m.open_time && Date.parse(m.open_time) > now) continue;
     const c = mapMarketToContract(m, "15m");
     if (c) return c;
   }
@@ -129,16 +137,12 @@ export async function fetchOrderbookAsks(ticker: string): Promise<{
 export async function enrichContractQuotes(
   contract: ContractWindow
 ): Promise<ContractWindow> {
-  try {
-    const book = await fetchOrderbookAsks(contract.ticker);
-    return {
-      ...contract,
-      yesAsk: book.yesAsk || contract.yesAsk,
-      noAsk: book.noAsk || contract.noAsk,
-    };
-  } catch {
-    return contract;
-  }
+  const book = await fetchOrderbookAsks(contract.ticker);
+  return {
+    ...contract,
+    yesAsk: book.yesAsk || contract.yesAsk,
+    noAsk: book.noAsk || contract.noAsk,
+  };
 }
 
 export async function fetchPublicTrades(
@@ -167,3 +171,4 @@ export async function fetchPublicTrades(
     ts: t.created_time || "",
   }));
 }
+

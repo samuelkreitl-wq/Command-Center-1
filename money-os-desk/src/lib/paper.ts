@@ -19,7 +19,13 @@ export function openPaperTrade(opts: {
   if (opts.hardStopActive) {
     throw new Error("Hard-stop active — paper size blocked");
   }
-  if (opts.size <= 0) throw new Error("Size must be > 0");
+  if (!Number.isSafeInteger(opts.size) || opts.size <= 0) {
+    throw new Error("Size must be a positive whole number");
+  }
+  const close = Date.parse(opts.contract.closeTime);
+  if (!Number.isFinite(close) || close <= Date.now()) {
+    throw new Error("This market window is closed");
+  }
 
   const entry =
     opts.side === "YES" ? opts.contract.yesAsk : opts.contract.noAsk;
@@ -50,6 +56,9 @@ export function settlePaperTrade(
   endPx: number
 ): PaperTrade {
   if (trade.settledAt) return trade;
+  if (!Number.isFinite(endPx) || endPx <= 0) {
+    throw new Error("Final price must be a positive finite number");
+  }
   const outcome: Direction = endPx >= trade.strike ? "UP" : "DOWN";
   const won =
     (trade.side === "YES" && outcome === "UP") ||
@@ -66,3 +75,4 @@ export function settlePaperTrade(
     pnl: Math.round(pnl * 100) / 100,
   };
 }
+

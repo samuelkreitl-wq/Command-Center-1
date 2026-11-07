@@ -90,6 +90,14 @@ export function lockFromLive(
   bars: Bar1m[],
   now = Date.now()
 ): CoreLock | null {
+  const close = Date.parse(contract.closeTime);
+  if (!Number.isFinite(close) || close <= now) {
+    throw new Error("This market window is closed");
+  }
+  if (!spot || !Number.isFinite(spot.price) || spot.price <= 0 ||
+      now - spot.ts > 30000 || spot.ts > now + 5000) {
+    throw new Error("A fresh spot price is required to lock a call");
+  }
   const eng = runEngine(contract, spot, bars, now);
   if (!eng) return null;
   const locks = loadLocks();
@@ -139,6 +147,13 @@ export function settleWindow(
   contract: ContractWindow,
   endPx: number
 ): { locks: CoreLock[]; trades: PaperTrade[] } {
+  if (!Number.isFinite(endPx) || endPx <= 0) {
+    throw new Error("Final price must be a positive finite number");
+  }
+  const close = Date.parse(contract.closeTime);
+  if (!Number.isFinite(close) || close > Date.now()) {
+    throw new Error("Wait until the window closes before manual settlement");
+  }
   const id = windowId(contract.ticker, contract.closeTime);
   const locks = settleLocksForWindow(id, endPx, contract.strike);
   const trades = settleTradesForWindow(id, endPx);
@@ -146,6 +161,9 @@ export function settleWindow(
 }
 
 export function setCustomReference(n: number | null): void {
+  if (n !== null && (!Number.isFinite(n) || n <= 0)) {
+    throw new Error("Reference price must be a positive finite number");
+  }
   saveCustomRef(n);
 }
 
@@ -156,3 +174,4 @@ export function listJournal(): CoreLock[] {
 export function listTradeLog(): PaperTrade[] {
   return loadTrades();
 }
+

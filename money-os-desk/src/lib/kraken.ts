@@ -6,7 +6,9 @@
 import type { SpotTick } from "./types";
 import type { Bar1m } from "./engine";
 
-const REST = "https://api.kraken.com/0/public";
+const REST = typeof window === "undefined"
+  ? "https://api.kraken.com/0/public"
+  : "/api/kraken";
 const PAIR = "XBTUSD";
 
 export interface KrakenTickerResult {
@@ -19,6 +21,7 @@ export interface KrakenTickerResult {
 async function getJson(url: string): Promise<unknown> {
   const res = await fetch(url, {
     headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) {
     throw new Error(`Kraken HTTP ${res.status} ${url}`);
@@ -107,3 +110,4 @@ export function krakenOhlcSubscribeMsg() {
     params: { channel: "ohlc", symbol: ["BTC/USD"], interval: 1 },
   };
 }
+

@@ -110,3 +110,4 @@ export function saveCustomRef(n: number | null): void {
   if (n == null) localStorage.removeItem(CUSTOM_REF_KEY);
   else localStorage.setItem(CUSTOM_REF_KEY, String(n));
 }
+

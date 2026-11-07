@@ -6,7 +6,7 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 
 | File | Role |
 |------|------|
-| `types.ts` | Contract, lock, paper, snapshot types (+ Fear & Greed) |
+| `types.ts` | Contract, lock, paper, snapshot types |
 | `signal-lock.ts` | Immutable core lock |
 | `engine.ts` | RSI/EMA/VWAP heuristic + book action |
 | `hard-stop.ts` | Cooldown after miss |
@@ -15,8 +15,7 @@ Drop into Command Center / Replit under `src/lib/` (or `src/lib/money-os/`).
 | `desk.ts` | Facade: snapshot, lock, paper, settle |
 | `kraken.ts` | **Live** REST ticker + 1m OHLC |
 | `kalshi.ts` | **Live** KXBTC15M markets + orderbook |
-| `feeds.ts` | Poll loop → buildSnapshot (includes Fear & Greed) |
-| `fear-greed.ts` | **Live** Crypto Fear & Greed Index (alternative.me) |
+| `feeds.ts` | Poll loop → buildSnapshot |
 
 ## Live feeds
 
@@ -26,20 +25,11 @@ Public data only — no API keys.
 import { startFeedLoop } from "./feeds";
 
 const stop = startFeedLoop((b) => {
-  // b.contract?.strike, b.spot?.price, b.snapshot.leanVsStrike
-  // b.fearGreed?.current?.value, b.fearGreed?.current?.classification
-  // b.errors
+  // b.contract?.strike, b.spot?.price, b.snapshot.leanVsStrike, b.errors
 }, { market: "15m", intervalMs: 8000 });
 ```
 
 5m: `SERIES_5M` is null until Kalshi lists a series.
-
-## Fear & Greed
-
-- Source: https://api.alternative.me/fng/
-- Current value (0–100) + classification (Extreme Fear / Fear / Neutral / Greed / Extreme Greed)
-- Also yesterday and ~last week
-- Available on every snapshot as `snapshot.fearGreed`
 
 ## Rules
 
@@ -47,3 +37,4 @@ const stop = startFeedLoop((b) => {
 - Settlement: endPx >= strike → UP
 - Paper settles vs strike, not custom ref
 - Hard-stop blocks paper after a miss
+
