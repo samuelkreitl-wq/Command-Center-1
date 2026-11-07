@@ -86,8 +86,11 @@ export function runEngine(
   const closes = bars.map((b) => b.close);
   const factors: string[] = [];
   let score = 0;
+  const call = callVsStrike(price, contract.strike);
 
-  if (distance >= 0) {
+  if (call === "AT STRIKE") {
+    factors.push("At strike");
+  } else if (call === "UP") {
     score += 1;
     factors.push(`Above strike by ${distance.toFixed(2)}`);
   } else {
@@ -135,7 +138,6 @@ export function runEngine(
     factors.push(`Late window (${minutesLeft.toFixed(1)}m left) — prefer NO_TRADE if edge thin`);
   }
 
-  const call: Direction = score >= 0 ? "UP" : "DOWN";
   const magnitude = Math.min(Math.abs(score), 3);
   const confidence = Math.round(50 + magnitude * 12);
 
@@ -145,7 +147,7 @@ export function runEngine(
   const p = confidence / 100;
 
   let action: SignalAction = "WATCH";
-  let actionWhy = "Edge thin versus live ask.";
+  let actionWhy = call === "AT STRIKE" ? "Price is at the strike." : "Edge thin versus live ask.";
 
   if (call === "UP" && yesAsk > 0 && yesAsk > p + 0.04) {
     action = "NO_TRADE";
@@ -173,7 +175,15 @@ export function runEngine(
   };
 }
 
+/** Compare a price to a strike in cents. Equality is AT STRIKE, not UP. */
+export function callVsStrike(price: number, strike: number): Direction {
+  const p = Math.round(price * 100) / 100;
+  const s = Math.round(strike * 100) / 100;
+  if (p === s) return "AT STRIKE";
+  return p > s ? "UP" : "DOWN";
+}
+
 export function leanVsLevel(price: number, level: number): Direction {
-  return price >= level ? "UP" : "DOWN";
+  return callVsStrike(price, level);
 }
 

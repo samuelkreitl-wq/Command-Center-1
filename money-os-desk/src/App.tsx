@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { buildSnapshot, listJournal, listTradeLog, lockFromLive, placePaper, setCustomReference, settleWindow } from "./lib/desk";
+import { buildSnapshot, halfwayAt, listJournal, listTradeLog, lockFromLive, placePaper, reviseLockedCall, setCustomReference, settleWindow } from "./lib/desk";
 import { pollDeskFeeds } from "./lib/feeds";
 import type { FeedBundle } from "./lib/feeds";
-import type { ContractWindow, CoreLock, PaperTrade, TradeSide } from "./lib/types";
+import { windowId } from "./lib/signal-lock";
+import type { ContractWindow, CoreLock, Direction, PaperTrade, TradeSide } from "./lib/types";
 
 type Tab = "desk" | "journal" | "trades";
 
@@ -32,6 +33,7 @@ const validContract = (contract: ContractWindow | null) =>
   !!contract &&
   contract.market === "15m" &&
   !!contract.ticker &&
+  typeof contract.strike === "number" &&
   Number.isFinite(contract.strike) &&
   contract.strike > 0 &&
   Number.isFinite(new Date(contract.closeTime).getTime()) &&
@@ -54,6 +56,9 @@ function App() {
   const [settlementWindowId, setSettlementWindowId] = useState("");
   const [finalPrice, setFinalPrice] = useState("");
   const [settleError, setSettleError] = useState("");
+  const [reviseTo, setReviseTo] = useState<Direction>("DOWN");
+  const [reviseReason, setReviseReason] = useState("");
+  const [reviseError, setReviseError] = useState("");
   const [now, setNow] = useState(Date.now());
   const refreshInFlight = useRef(false);
   const mounted = useRef(false);
@@ -109,7 +114,7 @@ function App() {
   const quoteValid = validQuote(quote);
   const sizeNumber = Number(size);
   const sizeValid = Number.isSafeInteger(sizeNumber) && sizeNumber > 0;
-  const paperEnabled = actionable && quoteValid && sizeValid && !current?.hardStop.active;
+  const paperEnabled = actionable && quoteValid && sizeValid && !current?.hardStop.active && !lock?.missed;
   const displayErrors = errors.filter(Boolean);
   const updateSnapshotFromLocal = () => {
     if (!bundle) return;
@@ -122,7 +127,8 @@ function App() {
   };
 
   const onLock = () => {
-    if (!contract || !actionable || activeLock || !current?.liveCall) return;
+    if (!contract || !actionable || activeLock || !current?.liveCall || missed) return;
+    if (contract.openTime && Date.parse(contract.openTime) <= Date.now()) return;
     try {
       const saved = lockFromLive(contract, bundle?.spot ?? null, bundle?.bars ?? []);
       if (!saved) throw new Error("The live signal is not complete enough to lock.");
@@ -171,7 +177,7 @@ function App() {
         ? row.closeTime
         : journal.find((entry) => entry.windowId === row.windowId)?.closeTime ?? row.windowId.split("::").slice(1).join("::");
       const existing = grouped.get(row.windowId) ?? { ticker: row.ticker, market: row.market, strike: row.strike, closeTime: derivedClose, pending: 0 };
-      if (!row.settledAt) existing.pending += 1;
+      if (!row.settledAt && !(row.source === "lock" && row.missed)) existing.pending += 1;
       grouped.set(row.windowId, existing);
     });
     return [...grouped.entries()]
@@ -213,7 +219,31 @@ function App() {
     }
   };
 
-  const feedOnline = !!bundle && !displayErrors.length && isFreshSpot(bundle);
+  const missed = !!lock?.missed;
+  const feedFresh = !!bundle && !displayErrors.length && isFreshSpot(bundle);
+  const feedLabel = loading ? "CONNECTING" : feedFresh ? "LIVE FEED" : "STALE";
+  const displayCall = missed ? "MISSED" : current?.liveCall ?? null;
+  const upcoming = bundle?.upcoming ?? null;
+  const upcomingLock = upcoming
+    ? journal.find((row) => row.windowId === windowId(upcoming.ticker, upcoming.closeTime)) ?? null
+    : null;
+  const half = lock ? halfwayAt(lock) : null;
+  const closeMs = lock ? Date.parse(lock.closeTime) : NaN;
+  const canRevise = !!lock && !missed && !lock.revisionRefusal && half != null && now >= half && now < closeMs;
+  const effectiveLocked = lock?.revisedCall ?? lock?.lockedCall ?? null;
+  const onRevise = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setReviseError("");
+    if (!lock) return;
+    try {
+      reviseLockedCall(lock.windowId, reviseTo, reviseReason, now);
+      setReviseReason("");
+      updateSnapshotFromLocal();
+    } catch (error) {
+      setReviseError(error instanceof Error ? error.message : String(error));
+      updateSnapshotFromLocal();
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -223,7 +253,7 @@ function App() {
           <div><div className="brand-name">money os</div><div className="brand-caption">BTC research desk</div></div>
         </div>
         <div className="topbar-right">
-          <div className="feed-status"><i className={`status-dot ${feedOnline ? "" : "offline"}`} /> <span>{loading ? "CONNECTING" : feedOnline ? "LIVE FEED" : "FEED DEGRADED"}</span><span>· 15M</span></div>
+          <div className="feed-status" data-testid="feed-status"><i className={`status-dot ${feedFresh ? "" : "offline"}`} /> <span>{feedLabel}</span><span>· 15M</span></div>
           <button className="refresh-button" onClick={() => void refresh(true)} disabled={refreshing}>
             <span className={`refresh-icon ${refreshing ? "refreshing" : ""}`}>↻</span>{refreshing ? "Updating" : "Refresh"}
           </button>
@@ -254,39 +284,54 @@ function App() {
           <div className="grid reveal">
             <div className="column">
               <section className="panel">
-                <div className="panel-head"><div><div className="panel-title">Active 15-minute window</div><div className="panel-kicker">Contract terms · live market</div></div><span className="window-badge">BTC / 15M</span></div>
+                <div className="panel-head"><div><div className="panel-title">Active 15-minute window</div><div className="panel-kicker">{feedFresh ? "Contract terms · live market" : "Contract terms · STALE"}</div></div><span className="window-badge">BTC / 15M</span></div>
                 {contract ? <>
                   <div className="contract-body">
                     <div className="contract-name-row"><div><div className="contract-name">Bitcoin above or below strike</div><div className="ticker">{contract.ticker}</div></div><div className="subtle-label">{validContract(contract) ? `CLOSES IN ${minutesText(contract.closeTime)}` : "WINDOW EXPIRED"}</div></div>
                     <div className="contract-metrics">
-                      <div className="metric"><div className="metric-label">Live spot</div><div className="metric-value large">{bundle?.spot ? money(bundle.spot.price) : "—"}</div></div>
+                      <div className="metric"><div className="metric-label">{feedFresh ? "Live spot" : "Spot · STALE"}</div><div className="metric-value large">{isFreshSpot(bundle) ? money(bundle?.spot?.price) : "—"}</div></div>
                       <div className="metric"><div className="metric-label">Strike</div><div className="metric-value">{money(contract.strike)}</div></div>
                       <div className="metric"><div className="metric-label">Contract close</div><div className="metric-value">{dateTime(contract.closeTime)}</div></div>
                     </div>
-                    <div className="spot-row"><span className={`status-dot ${isFreshSpot(bundle) ? "" : "offline"}`} /><strong>{bundle?.spot ? money(bundle.spot.price) : "No spot tick"}</strong><span className="source-chip">{bundle?.spot?.source ?? "no source"}</span><span>{bundle?.spot ? `updated ${dateTime(bundle.spot.ts)}` : "Waiting for Kraken spot"}</span></div>
+                    <div className="spot-row"><span className={`status-dot ${feedFresh ? "" : "offline"}`} /><strong>{isFreshSpot(bundle) ? money(bundle?.spot?.price) : "No spot tick"}</strong><span className="source-chip">{feedFresh ? (bundle?.spot?.source ?? "no source") : "STALE"}</span><span>{feedFresh && bundle?.spot ? `updated ${dateTime(bundle.spot.ts)}` : "STALE"}</span></div>
                   </div>
-                </> : <div className="placeholder"><div className="placeholder-mark">—</div>No active 15-minute contract was returned by the live feed.<br />The desk will keep checking; no market terms are inferred.<br />Kraken spot: {bundle?.spot ? money(bundle.spot.price) : "Unavailable"}</div>}
+                </> : <div className="placeholder"><div className="placeholder-mark">—</div>No active 15-minute contract was returned by the live feed.<br />The desk will keep checking; no market terms are inferred.<br />Kraken spot: {isFreshSpot(bundle) ? money(bundle?.spot?.price) : "Unavailable"}</div>}
               </section>
+              {upcoming && <section className="panel" data-testid="upcoming-window">
+                <div className="panel-head"><div><div className="panel-title">Next 15-minute window</div><div className="panel-kicker">Locked automatically before the open</div></div><span className="window-badge">NEXT</span></div>
+                <div className="contract-body">
+                  <div className="contract-name-row"><div><div className="contract-name">Upcoming contract</div><div className="ticker">{upcoming.ticker}</div></div><div className="subtle-label">{upcoming.openTime ? `OPENS ${dateTime(upcoming.openTime)}` : "OPEN TIME UNKNOWN"}</div></div>
+                  <div className="contract-metrics">
+                    <div className="metric"><div className="metric-label">Expected strike</div><div className="metric-value" data-testid="expected-strike">{money(upcomingLock?.strike)}</div></div>
+                    <div className="metric"><div className="metric-label">Official strike</div><div className="metric-value" data-testid="official-strike">{upcomingLock?.officialStrike != null ? money(upcomingLock.officialStrike) : upcoming.strike != null ? money(upcoming.strike) : "Pending"}</div></div>
+                    <div className="metric"><div className="metric-label">Auto call</div><div className="metric-value" data-testid="upcoming-call">{upcomingLock?.missed ? "MISSED" : upcomingLock?.revisedCall ?? upcomingLock?.lockedCall ?? "Waiting"}</div></div>
+                  </div>
+                  <div className="data-note">{upcomingLock?.missed ? "This window opened before a call was locked." : upcomingLock ? `Locked automatically · reference ${upcomingLock.expectedStrikeSource ?? "expected strike"}` : "Waiting for a fresh spot to lock a call."}</div>
+                </div>
+              </section>}
 
               <section className="panel">
-                <div className="panel-head"><div><div className="panel-title">Live read</div><div className="panel-kicker">Heuristic signal · not a forecast</div></div>{current && <span className={`action-pill ${current.action.toLowerCase().replace("_", "-")}`}>{current.action.replace("_", " ")}</span>}</div>
-                {current && (current.liveCall || current.actionWhy) ? <div className="signal-layout">
-                  <div className={`call-box ${current.liveCall?.toLowerCase() ?? ""}`}>
+                <div className="panel-head"><div><div className="panel-title">{feedFresh ? "Live read" : "Read · STALE"}</div><div className="panel-kicker">Heuristic signal · not a forecast</div></div>{current && !missed && <span className={`action-pill ${current.action.toLowerCase().replace("_", "-")}`}>{current.action.replace("_", " ")}</span>}</div>
+                {current && (missed || current.liveCall || current.actionWhy) ? <div className="signal-layout">
+                  <div className={`call-box ${(displayCall ?? "").toLowerCase().replace(/\s+/g, "-")}`}>
                     <div className="subtle-label">Directional call</div>
-                    <div><div className={`call-direction ${current.liveCall?.toLowerCase() ?? "none"}`}>{current.liveCall ?? "—"}</div><div className="confidence-line">{current.liveCall ? `${current.confidence}% confidence` : "No valid call"}</div></div>
+                    <div><div className={`call-direction ${(displayCall ?? "none").toLowerCase().replace(/\s+/g, "-")}`} data-testid="directional-call">{displayCall ?? "—"}</div><div className="confidence-line">{missed ? "No call was locked" : current.liveCall ? `${current.confidence}% confidence` : "No valid call"}</div></div>
                   </div>
-                  <div className="signal-detail"><div className="subtle-label">Why this read</div><p className="reason">{current.actionWhy || "Waiting for enough valid data to form a read."}</p><div className="factor-list">{current.factors.length ? current.factors.map((factor, i) => <span className="factor" key={`${factor}-${i}`}>{factor}</span>) : <span className="factor">No supporting factors available</span>}</div></div>
+                  <div className="signal-detail"><div className="subtle-label">Why this read</div><p className="reason">{missed ? "No call was locked before this window opened." : current.actionWhy || "Waiting for enough valid data to form a read."}</p><div className="factor-list">{missed ? <span className="factor">MISSED</span> : current.factors.length ? current.factors.map((factor, i) => <span className="factor" key={`${factor}-${i}`}>{factor}</span>) : <span className="factor">No supporting factors available</span>}</div></div>
                 </div> : <div className="placeholder">Signal unavailable until live inputs support a valid read.</div>}
                 {current?.hardStop.active && <div style={{ padding: "0 20px 15px" }}><div className="hard-stop"><strong>Hard stop active</strong>{current.hardStop.reason}{current.hardStop.until ? ` · until ${dateTime(current.hardStop.until)}` : ""}</div></div>}
                 {!actionable && <div className="data-note" style={{ padding: "0 20px 14px" }}>Live read is unavailable or out of date. New calls and paper entries are disabled.</div>}
-                <div className={`lock-strip ${activeLock ? "locked" : ""}`}><div className="lock-copy"><strong>{activeLock ? `Locked ${lock.lockedCall} · ${lock.confidence}% · ${dateTime(lock.lockedAt)}` : "Immutable core lock"}</strong>{activeLock ? "This window's original directional call cannot be edited." : "Record the live call once for this contract window."}</div><button className={activeLock ? "button-secondary" : "button-primary"} onClick={onLock} disabled={!actionable || !current?.liveCall || !!lock}>{lock ? "Locked" : "Lock this call"}</button></div>
+                {missed ? <div className="lock-strip"><div className="lock-copy"><strong>MISSED</strong>This window was already open. The desk does not back-fill a call.</div><button className="button-secondary" type="button" disabled>Missed</button></div> : <div className={`lock-strip ${activeLock ? "locked" : ""}`}><div className="lock-copy"><strong>{activeLock ? `Locked ${effectiveLocked} · ${lock.confidence}% · ${dateTime(lock.lockedAt)}` : "Immutable core lock"}</strong>{lock?.revision ? ` Halfway change: ${lock.revision.from} to ${lock.revision.to}. ${lock.revision.reason}` : activeLock ? "This window's original directional call cannot be edited." : "Record the live call once for this contract window."}</div><button className={activeLock ? "button-secondary" : "button-primary"} onClick={onLock} disabled={!actionable || !current?.liveCall || !!lock}>{lock ? "Locked" : "Lock this call"}</button></div>}
+                {canRevise && <form className="settle-panel" data-testid="revise-form" onSubmit={onRevise}><div className="settle-row"><label><span className="size-label">Revised call</span><select aria-label="Revised call" className="input settle-select" value={reviseTo} onChange={(e) => setReviseTo(e.target.value as Direction)}><option>UP</option><option>DOWN</option><option>AT STRIKE</option></select></label><label><span className="size-label">Reason</span><input aria-label="Change reason" className="input settle-select" value={reviseReason} onChange={(e) => setReviseReason(e.target.value)} placeholder="Why this one change" /></label><button className="button-secondary" type="submit">Save change</button></div>{lock?.revision && <div className="settle-help" data-testid="revision-note">Changed {lock.revision.from} to {lock.revision.to}: {lock.revision.reason}</div>}</form>}
+                {lock?.revisionRefusal && <div className="form-error" data-testid="revision-refusal" role="alert">Second change refused. {lock.revisionRefusal.attempted} was not applied.</div>}
+                {reviseError && <div className="form-error" role="alert">{reviseError}</div>}
               </section>
 
               <section className="panel">
                 <div className="panel-head"><div><div className="panel-title">Custom reference</div><div className="panel-kicker">Personal comparison level · browser saved</div></div></div>
                 <div className="reference-row"><div className="reference-copy"><div className="subtle-label">Your reference</div><div className="reference-value">{current?.customRef ? money(current.customRef) : "Not set"}</div></div><form className="inline-form" onSubmit={onReference}><input aria-label="Custom reference price" className="input" type="number" min="0.000001" step="any" placeholder="Enter price" value={customRef} onChange={(e) => setCustomRef(e.target.value)} /><button className="button-secondary" type="submit">Save level</button><button className="button-secondary" type="button" onClick={() => { try { setCustomReference(null); setCustomRef(""); setReferenceError(""); updateSnapshotFromLocal(); } catch (error) { setReferenceError(error instanceof Error ? error.message : String(error)); void refresh(false); } }}>Clear</button></form></div>
                 {referenceError && <div className="form-error" role="alert">{referenceError}</div>}
-                {current?.customRef != null && current.distanceToCustom != null && <div className="lock-strip"><div className="lock-copy"><strong>Spot vs reference</strong>{current.leanVsCustom ?? "—"} · {money(Math.abs(current.distanceToCustom))} {current.distanceToCustom >= 0 ? "above" : "below"}</div></div>}
+                {current?.customRef != null && current.distanceToCustom != null && <div className="lock-strip"><div className="lock-copy"><strong>Spot vs reference</strong>{current.leanVsCustom ?? "—"} · {money(Math.abs(current.distanceToCustom))} {current.distanceToCustom === 0 ? "at the reference" : current.distanceToCustom > 0 ? "above" : "below"}</div></div>}
               </section>
             </div>
 
@@ -300,7 +345,7 @@ function App() {
                     <button className={`side-option ${side === "NO" ? "active no" : ""}`} onClick={() => setSide("NO")}>NO</button>
                   </div>
                   <div className="paper-entry">
-                    <div className={`quote ${quoteValid ? "" : "invalid"}`}><div className="quote-label">{side} ask · live quote</div><div className="quote-value">{quoteValid ? quote.toFixed(3) : "Unavailable"}</div></div>
+                    <div className={`quote ${quoteValid ? "" : "invalid"}`}><div className="quote-label">{side} ask · {feedFresh ? "live quote" : "STALE"}</div><div className="quote-value">{quoteValid ? quote.toFixed(3) : "Unavailable"}</div></div>
                     <label><span className="size-label">Contracts</span><input className="input paper-size" type="number" min="1" step="1" inputMode="numeric" value={size} onChange={(e) => setSize(e.target.value)} /></label>
                   </div>
                   <p className="paper-warning">Paper only. This creates a browser-local practice record and does not place an order or move money.</p>
@@ -334,7 +379,7 @@ function App() {
 
         {tab === "journal" && <section className="panel table-panel reveal">
           <div className="history-heading"><div><div className="panel-title">Directional journal</div><div className="panel-kicker">Immutable calls · browser-local records</div></div><button className="button-secondary" onClick={() => { syncLocalRows(); void refresh(true); }}>Refresh records</button></div>
-          {journal.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No directional calls have been locked yet.<br />A call recorded on the desk will appear here and cannot be rewritten.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Locked at</th><th>Call</th><th>Confidence</th><th>Start spot</th><th>Strike</th><th>Outcome</th><th>Result</th></tr></thead><tbody>{journal.map((row) => <tr key={row.windowId}><td className="table-primary">{row.ticker}<br /><span style={{ color: "#8a958e" }}>{dateTime(row.closeTime)}</span></td><td>{dateTime(row.lockedAt)}</td><td className={row.lockedCall === "UP" ? "result-good" : "result-bad"}>{row.lockedCall}</td><td>{row.confidence}%</td><td>{money(row.startPx)}</td><td>{money(row.strike)}</td><td>{row.outcome ?? (row.settledAt ? "—" : "Pending")}</td><td className={row.hit === true ? "result-good" : row.hit === false ? "result-bad" : ""}>{row.hit == null ? "—" : row.hit ? "Correct" : "Miss"}</td></tr>)}</tbody></table></div>}
+          {journal.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No directional calls have been locked yet.<br />A call recorded on the desk will appear here and cannot be rewritten.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Locked at</th><th>Call</th><th>Confidence</th><th>Start spot</th><th>Strike</th><th>Outcome</th><th>Result</th></tr></thead><tbody>{journal.map((row) => <tr key={row.windowId}><td className="table-primary">{row.ticker}<br /><span style={{ color: "#8a958e" }}>{dateTime(row.closeTime)}</span></td><td>{dateTime(row.lockedAt)}</td><td className={row.missed ? "" : row.lockedCall === "UP" || row.lockedCall === "AT STRIKE" ? "result-good" : "result-bad"}>{row.missed ? "MISSED" : row.revisedCall ? `${row.lockedCall} → ${row.revisedCall}` : row.lockedCall}{row.revision ? <div>Reason: {row.revision.reason}</div> : null}{row.revisionRefusal ? <div>Second change refused</div> : null}</td><td>{row.confidence}%</td><td>{money(row.startPx)}</td><td>{money(row.strike)}</td><td>{row.outcome ?? (row.settledAt ? "—" : "Pending")}</td><td className={row.hit === true ? "result-good" : row.hit === false ? "result-bad" : ""}>{row.hit == null ? "—" : row.hit ? "Correct" : "Miss"}</td></tr>)}</tbody></table></div>}
           <div className="data-note" style={{ padding: "14px 20px" }}>Saved to local browser storage only. Clearing browser data removes this journal.</div>
         </section>}
 

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { buildSnapshot, lockFromLive, placePaper, settleWindow, setCustomReference } from "./desk";
 import { loadLocks, loadTrades } from "./journal";
 import { openPaperTrade, settlePaperTrade } from "./paper";
-import { mapMarketToContract, fetchOrderbookAsks } from "./kalshi";
+import { mapMarketToContract, mapScheduledMarket, fetchOrderbookAsks } from "./kalshi";
+import { chooseExpectedStrike, maintainWindows, reviseLockedCall } from "./desk";
 import type { ContractWindow } from "./types";
 
 const store = new Map<string, string>();
@@ -96,5 +97,131 @@ test("orderbook asks are derived from opposite-side bids", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("price exactly at the strike is AT STRIKE; above is UP and below is DOWN", () => {
+  const c = contract();
+  assert.equal(lockFromLive(c, { price: 80000, ts: Date.now(), source: "manual" }, [])?.lockedCall, "AT STRIKE");
+  const up = { ...c, ticker: "UP", closeTime: new Date(Date.now() + 120000).toISOString() };
+  const down = { ...c, ticker: "DOWN", closeTime: new Date(Date.now() + 180000).toISOString() };
+  assert.equal(lockFromLive(up, { price: 80000.01, ts: Date.now(), source: "manual" }, [])?.lockedCall, "UP");
+  assert.equal(lockFromLive(down, { price: 79999.99, ts: Date.now(), source: "manual" }, [])?.lockedCall, "DOWN");
+});
+
+test("a null strike locks before the open and a later official strike does not change the call", () => {
+  const now = Date.now();
+  const spot = { price: 80100, ts: now, source: "manual" as const };
+  const active: ContractWindow = {
+    ...contract(), ticker: "OPEN-NOW", strike: 79000,
+    openTime: new Date(now - 60_000).toISOString(),
+    closeTime: new Date(now + 14 * 60_000).toISOString(),
+  };
+  const upcoming: ContractWindow = {
+    ticker: "NEXT", series: "KXBTC15M", market: "15m", strike: null,
+    openTime: new Date(now + 5 * 60_000).toISOString(),
+    closeTime: new Date(now + 20 * 60_000).toISOString(),
+    yesAsk: 0, noAsk: 0,
+  };
+  assert.equal(chooseExpectedStrike({ ownStrike: null, openMarketStrike: 79000, priorSettle: null, spot: 80100 })?.source, "open-market");
+  assert.doesNotThrow(() => maintainWindows({ active, upcoming, spot, now }));
+  const next = loadLocks().find((row) => row.ticker === "NEXT");
+  assert.equal(next?.lockedCall, "UP");
+  assert.equal(next?.officialStrike, undefined);
+  assert.ok(next && next.lockedAt < Date.parse(upcoming.openTime!));
+  assert.equal(loadLocks().find((row) => row.ticker === "OPEN-NOW")?.missed, true);
+  assert.equal(loadLocks().find((row) => row.ticker === "OPEN-NOW")?.lockedCall, null);
+  maintainWindows({ active, upcoming: { ...upcoming, strike: 81000 }, spot, now });
+  const posted = loadLocks().find((row) => row.ticker === "NEXT");
+  assert.equal(posted?.lockedCall, "UP");
+  assert.equal(posted?.revisedCall, undefined);
+  assert.equal(posted?.officialStrike, 81000);
+  const bare = mapScheduledMarket({
+    ticker: "BARE", event_ticker: "BARE", status: "initialized",
+    close_time: upcoming.closeTime, open_time: upcoming.openTime,
+  }, "15m");
+  assert.equal(bare?.strike, null);
+  const solo: ContractWindow = {
+    ticker: "SOLO", series: "KXBTC15M", market: "15m", strike: null,
+    openTime: new Date(now + 30 * 60_000).toISOString(),
+    closeTime: new Date(now + 45 * 60_000).toISOString(),
+    yesAsk: 0, noAsk: 0,
+  };
+  maintainWindows({ active: null, upcoming: solo, spot, now });
+  const soloLock = loadLocks().find((row) => row.ticker === "SOLO");
+  assert.equal(soloLock?.expectedStrikeSource, "spot");
+  assert.equal(soloLock?.lockedCall, "AT STRIKE");
+  assert.equal(soloLock?.strike, 80100);
+});
+
+test("one halfway change is saved with its reason; a second is refused and stays refused", () => {
+  const now = Date.now();
+  const open = new Date(now + 60_000).toISOString();
+  const close = new Date(now + 16 * 60_000).toISOString();
+  const upcoming: ContractWindow = {
+    ticker: "HALF", series: "KXBTC15M", market: "15m", strike: 80000,
+    openTime: open, closeTime: close, yesAsk: 0.4, noAsk: 0.6,
+  };
+  maintainWindows({
+    active: null, upcoming, spot: { price: 80100, ts: now, source: "manual" }, now,
+  });
+  const locked = loadLocks().find((row) => row.ticker === "HALF");
+  assert.ok(locked?.lockedCall);
+  const half = Date.parse(open) + (Date.parse(close) - Date.parse(open)) / 2;
+  assert.throws(() => reviseLockedCall(locked!.windowId, "DOWN", "too early", half - 1000), /halfway/);
+  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revision, undefined);
+  const changed = reviseLockedCall(locked!.windowId, "DOWN", "spot flipped", half + 10);
+  assert.equal(changed.lockedCall, "UP");
+  assert.equal(changed.revisedCall, "DOWN");
+  assert.equal(changed.revision?.reason, "spot flipped");
+  assert.throws(() => reviseLockedCall(locked!.windowId, "AT STRIKE", "again", half + 20), /second change is refused/);
+  const refused = loadLocks().find((row) => row.ticker === "HALF");
+  assert.equal(refused?.revisedCall, "DOWN");
+  assert.equal(refused?.revisionRefusal?.attempted, "AT STRIKE");
+  assert.equal(refused?.revisionRefusal?.reason, "again");
+  assert.throws(() => reviseLockedCall(locked!.windowId, "UP", "third", half + 30), /already refused/);
+  const still = loadLocks().find((row) => row.ticker === "HALF");
+  assert.equal(still?.revisedCall, "DOWN");
+  assert.equal(still?.revisionRefusal?.attempted, "AT STRIKE");
+});
+
+test("a window the desk missed is marked MISSED and is never back-filled", () => {
+  const now = Date.now();
+  const active: ContractWindow = {
+    ...contract(),
+    openTime: new Date(now - 60_000).toISOString(),
+    closeTime: new Date(now + 14 * 60_000).toISOString(),
+  };
+  maintainWindows({
+    active, upcoming: null, spot: { price: 80100, ts: now, source: "manual" }, now,
+  });
+  assert.equal(loadLocks().length, 1);
+  assert.equal(loadLocks()[0].missed, true);
+  assert.equal(loadLocks()[0].lockedCall, null);
+  maintainWindows({
+    active, upcoming: null, spot: { price: 77000, ts: now, source: "manual" }, now,
+  });
+  assert.equal(loadLocks().length, 1);
+  assert.equal(loadLocks()[0].lockedCall, null);
+  assert.throws(() => lockFromLive(active, { price: 80100, ts: now, source: "manual" }, [], now), /already opened/);
+  assert.equal(loadLocks()[0].lockedCall, null);
+
+  const upcoming: ContractWindow = {
+    ticker: "LATE", series: "KXBTC15M", market: "15m", strike: null,
+    openTime: new Date(now + 10_000).toISOString(),
+    closeTime: new Date(now + 15 * 60_000 + 10_000).toISOString(),
+    yesAsk: 0, noAsk: 0,
+  };
+  maintainWindows({
+    active: null, upcoming, spot: { price: 80000, ts: now - 31_000, source: "manual" }, now,
+  });
+  assert.equal(loadLocks().find((row) => row.ticker === "LATE"), undefined);
+  const later = now + 11_000;
+  const opened: ContractWindow = { ...upcoming, strike: 80500 };
+  maintainWindows({
+    active: opened, upcoming: null, spot: { price: 81000, ts: later, source: "manual" }, now: later,
+  });
+  const late = loadLocks().find((row) => row.ticker === "LATE");
+  assert.equal(late?.missed, true);
+  assert.equal(late?.lockedCall, null);
 });
 

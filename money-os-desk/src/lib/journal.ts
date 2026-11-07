@@ -37,13 +37,23 @@ export function appendLock(lock: CoreLock): CoreLock[] {
   return rows;
 }
 
+/** Replace one window row in place. Used for the official strike and the halfway change. */
+export function replaceLock(lock: CoreLock): CoreLock[] {
+  const rows = loadLocks();
+  const index = rows.findIndex((r) => r.windowId === lock.windowId);
+  if (index < 0) rows.push(lock);
+  else rows[index] = lock;
+  saveLocks(rows);
+  return rows;
+}
+
 export function settleLocksForWindow(
   windowId: string,
   endPx: number,
   strike: number
 ): CoreLock[] {
   const rows = loadLocks().map((r) => {
-    if (r.windowId !== windowId || r.settledAt) return r;
+    if (r.windowId !== windowId || r.settledAt || r.missed) return r;
     return settleCore({ ...r, strike: r.strike || strike }, endPx);
   });
   saveLocks(rows);

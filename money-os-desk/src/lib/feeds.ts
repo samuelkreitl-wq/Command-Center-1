@@ -6,11 +6,12 @@ import type { ContractWindow, DeskSnapshot, MarketWindow } from "./types";
 import type { Bar1m } from "./engine";
 import type { SpotTick } from "./types";
 import { pollKraken } from "./kraken";
-import { enrichContractQuotes, fetchActiveContract } from "./kalshi";
-import { buildSnapshot } from "./desk";
+import { enrichContractQuotes, fetchActiveContract, fetchNext15mContract } from "./kalshi";
+import { buildSnapshot, maintainWindows } from "./desk";
 
 export interface FeedBundle {
   contract: ContractWindow | null;
+  upcoming: ContractWindow | null;
   spot: SpotTick | null;
   bars: Bar1m[];
   snapshot: DeskSnapshot;
@@ -23,12 +24,14 @@ export async function pollDeskFeeds(
 ): Promise<FeedBundle> {
   const errors: string[] = [];
   let contract: ContractWindow | null = null;
+  let upcoming: ContractWindow | null = null;
   let spot: SpotTick | null = null;
   let bars: Bar1m[] = [];
 
   const results = await Promise.allSettled([
     fetchActiveContract(market),
     pollKraken(),
+    market === "15m" ? fetchNext15mContract() : Promise.resolve(null),
   ]);
 
   if (results[0].status === "fulfilled") {
@@ -55,9 +58,24 @@ export async function pollDeskFeeds(
     );
   }
 
+  if (results[2].status === "fulfilled") {
+    upcoming = results[2].value;
+  } else {
+    errors.push(
+      `kalshi-next: ${results[2].reason instanceof Error ? results[2].reason.message : String(results[2].reason)}`
+    );
+  }
+
+  try {
+    maintainWindows({ active: contract, upcoming, spot, bars });
+  } catch (e) {
+    errors.push(`windows: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const snapshot = buildSnapshot(contract, spot, bars);
   return {
     contract,
+    upcoming,
     spot,
     bars,
     snapshot,
@@ -84,6 +102,7 @@ export function startFeedLoop(
       if (!stopped) {
         onTick({
           contract: null,
+          upcoming: null,
           spot: null,
           bars: [],
           snapshot: buildSnapshot(null, null, []),

@@ -74,8 +74,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .call-box.up { background:#e8f3e8; border-color:#d7e9d7; }
 .call-box.down { background:#faeee8; border-color:#f0ded2; }
 .call-direction { font-size:24px; font-weight:800; letter-spacing:-.06em; margin-top:17px; }
+.call-box.at-strike { background:#e7f0f6; border-color:#d5e3ee; }
 .call-direction.up { color:#226b50; }
 .call-direction.down { color:#b25d3d; }
+.call-direction.at-strike { color:#1f4d6e; }
+.call-direction.missed { color:#8a5a00; }
 .call-direction.none { color:#87928c; }
 .confidence-line { margin-top:6px; color:#748078; font:10px var(--mono); }
 .signal-detail { padding:2px 0; min-width:0; }

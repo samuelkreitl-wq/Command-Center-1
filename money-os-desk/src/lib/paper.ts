@@ -27,6 +27,7 @@ export function openPaperTrade(opts: {
     throw new Error("This market window is closed");
   }
 
+  if (opts.contract.strike == null) throw new Error("Missing strike for paper fill");
   const entry =
     opts.side === "YES" ? opts.contract.yesAsk : opts.contract.noAsk;
   if (!(entry > 0 && entry < 1)) {
