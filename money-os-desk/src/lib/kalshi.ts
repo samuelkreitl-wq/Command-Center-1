@@ -6,7 +6,9 @@
 import type { ContractWindow, MarketWindow } from "./types";
 
 export const KALSHI_BASE =
-  "https://api.elections.kalshi.com/trade-api/v2";
+  typeof window === "undefined"
+    ? "https://api.elections.kalshi.com/trade-api/v2"
+    : "/api/kalshi";
 
 export const SERIES_15M = "KXBTC15M";
 export const SERIES_5M: string | null = null;
@@ -35,7 +37,10 @@ function dollars(s?: string): number {
 
 async function getJson(path: string): Promise<unknown> {
   const url = path.startsWith("http") ? path : `${KALSHI_BASE}${path}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(15000),
+  });
   if (!res.ok) {
     throw new Error(`Kalshi HTTP ${res.status} ${url}`);
   }
@@ -54,6 +59,32 @@ export function mapMarketToContract(
     market,
     strike,
     closeTime: m.close_time,
+    openTime: m.open_time,
+    yesAsk: dollars(m.yes_ask_dollars),
+    noAsk: dollars(m.no_ask_dollars),
+  };
+}
+
+/**
+ * Upcoming window. A missing floor_strike is left null; it does not throw
+ * and it is not replaced with a guessed number.
+ */
+export function mapScheduledMarket(
+  m: KalshiMarketRaw,
+  market: MarketWindow
+): ContractWindow | null {
+  if (!m.ticker || !m.close_time || !m.open_time) return null;
+  if (!Number.isFinite(Date.parse(m.open_time)) || !Number.isFinite(Date.parse(m.close_time))) {
+    return null;
+  }
+  const strike = Number(m.floor_strike);
+  return {
+    ticker: m.ticker,
+    series: market === "15m" ? SERIES_15M : SERIES_5M || "UNKNOWN",
+    market,
+    strike: Number.isFinite(strike) && strike > 0 ? strike : null,
+    closeTime: m.close_time,
+    openTime: m.open_time,
     yesAsk: dollars(m.yes_ask_dollars),
     noAsk: dollars(m.no_ask_dollars),
   };
@@ -76,10 +107,24 @@ export async function fetchOpenMarkets(
 export async function fetchActive15mContract(): Promise<ContractWindow | null> {
   const markets = await fetchOpenMarkets(SERIES_15M);
   for (const m of markets) {
+    const now = Date.now();
+    if (Date.parse(m.close_time) <= now) continue;
+    if (m.open_time && Date.parse(m.open_time) > now) continue;
     const c = mapMarketToContract(m, "15m");
     if (c) return c;
   }
   return null;
+}
+
+/** Soonest KXBTC15M that has not opened. floor_strike may be null. */
+export async function fetchNext15mContract(now = Date.now()): Promise<ContractWindow | null> {
+  const path = `/markets?series_ticker=${encodeURIComponent(SERIES_15M)}&status=unopened&limit=200`;
+  const data = (await getJson(path)) as { markets?: KalshiMarketRaw[] };
+  const upcoming = (data.markets ?? [])
+    .map((m) => mapScheduledMarket(m, "15m"))
+    .filter((m): m is ContractWindow => m != null && Date.parse(m.openTime || "") > now)
+    .sort((a, b) => Date.parse(a.openTime || "") - Date.parse(b.openTime || ""));
+  return upcoming[0] ?? null;
 }
 
 export async function fetchActive5mContract(): Promise<ContractWindow | null> {
@@ -129,16 +174,12 @@ export async function fetchOrderbookAsks(ticker: string): Promise<{
 export async function enrichContractQuotes(
   contract: ContractWindow
 ): Promise<ContractWindow> {
-  try {
-    const book = await fetchOrderbookAsks(contract.ticker);
-    return {
-      ...contract,
-      yesAsk: book.yesAsk || contract.yesAsk,
-      noAsk: book.noAsk || contract.noAsk,
-    };
-  } catch {
-    return contract;
-  }
+  const book = await fetchOrderbookAsks(contract.ticker);
+  return {
+    ...contract,
+    yesAsk: book.yesAsk || contract.yesAsk,
+    noAsk: book.noAsk || contract.noAsk,
+  };
 }
 
 export async function fetchPublicTrades(
@@ -167,3 +208,4 @@ export async function fetchPublicTrades(
     ts: t.created_time || "",
   }));
 }
+

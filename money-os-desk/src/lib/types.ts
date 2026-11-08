@@ -1,6 +1,6 @@
 /** Money OS — Kalshi short-window desk types (Phase 1+2) */
 
-export type Direction = "UP" | "DOWN";
+export type Direction = "UP" | "DOWN" | "AT STRIKE";
 export type MarketWindow = "15m" | "5m";
 export type SignalAction = "NO_TRADE" | "WATCH" | "LEAN_YES" | "LEAN_NO";
 export type TradeMode = "paper" | "live";
@@ -10,8 +10,10 @@ export interface ContractWindow {
   ticker: string;
   series: string;
   market: MarketWindow;
-  strike: number;
+  /** Null until Kalshi publishes floor_strike. Never invent one here. */
+  strike: number | null;
   closeTime: string; // ISO
+  openTime?: string;
   yesAsk: number; // 0–1
   noAsk: number; // 0–1
 }
@@ -22,18 +24,43 @@ export interface SpotTick {
   source: "kraken" | "proxy" | "manual";
 }
 
+export interface CallRevision {
+  at: number;
+  from: Direction;
+  to: Direction;
+  reason: string;
+}
+
+export interface RevisionRefusal {
+  at: number;
+  attempted: Direction;
+  reason: string;
+}
+
 export interface CoreLock {
   windowId: string; // ticker + closeTime
   ticker: string;
   market: MarketWindow;
-  lockedCall: Direction;
+  /** Null when there is no call yet, or when the window was missed. */
+  lockedCall: Direction | null;
   confidence: number;
   lockedAt: number;
   startPx: number;
-  strike: number;
+  /** Official floor_strike the call was locked against. Null while waiting, and when none was posted. */
+  strike: number | null;
   closeTime: string;
+  openTime?: string;
   action: SignalAction;
   factors: string[];
+  /** Seen before floor_strike existed. No call and no strike number. */
+  awaitingStrike?: boolean;
+  /** Strike posted while the desk was not running, or the spot was stale on the poll that first saw it. */
+  missed?: boolean;
+  /** The one change made on the ten-minute tick. lockedCall stays the original. */
+  revisedCall?: Direction;
+  revision?: CallRevision;
+  /** A second change was refused. It is not cleared and cannot be approved later. */
+  revisionRefusal?: RevisionRefusal;
   /** set only on settle — never rewrite call fields */
   settledAt?: number;
   outcome?: Direction;
@@ -73,22 +100,6 @@ export interface HardStopState {
   lastMissTicker?: string;
 }
 
-/** Crypto Fear & Greed (alternative.me) */
-export interface FearGreedReading {
-  value: number;
-  classification: string;
-  timestamp: number;
-  timeUntilUpdate?: number;
-}
-
-export interface FearGreedSnapshot {
-  current: FearGreedReading | null;
-  yesterday?: FearGreedReading | null;
-  lastWeek?: FearGreedReading | null;
-  fetchedAt: number;
-  error?: string;
-}
-
 export interface DeskSnapshot {
   contract: ContractWindow | null;
   spot: SpotTick | null;
@@ -107,5 +118,5 @@ export interface DeskSnapshot {
   scalp: ScalpState | null;
   hardStop: HardStopState;
   evidence: { settled: number; target: number; wins: number; winRate: string };
-  fearGreed?: FearGreedSnapshot | null;
 }
+

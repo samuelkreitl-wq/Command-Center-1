@@ -72,6 +72,7 @@ export function requestOverride(
 ): OverrideEvent {
   const r = reason.trim();
   if (!r) throw new Error("Override requires a non-empty reason");
+  if (core.lockedCall == null) throw new Error("No locked call to override");
   return {
     windowId: core.windowId,
     previousCall: core.lockedCall,
@@ -81,9 +82,9 @@ export function requestOverride(
   };
 }
 
-/** Settle core once. Idempotent. Outcome = endPx >= strike → UP. */
+/** Settle core once. Idempotent. Outcome = endPx >= strike → UP. A missed window has no call to settle. */
 export function settleCore(lock: CoreLock, endPx: number): CoreLock {
-  if (lock.settledAt) return lock;
+  if (lock.settledAt || lock.missed || lock.lockedCall == null || lock.strike == null) return lock;
   const outcome: Direction = endPx >= lock.strike ? "UP" : "DOWN";
   const hit = outcome === lock.lockedCall;
   return {
@@ -97,3 +98,4 @@ export function settleCore(lock: CoreLock, endPx: number): CoreLock {
       : `MISS. Called ${lock.lockedCall} @ ${lock.confidence}%; ${lock.startPx} → ${endPx} vs strike ${lock.strike}`,
   };
 }
+

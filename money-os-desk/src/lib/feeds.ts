@@ -1,21 +1,22 @@
 /**
- * Live feed orchestrator: Kalshi contract + Kraken spot/OHLC + Fear & Greed → desk snapshot.
+ * Live feed orchestrator: Kalshi contract + Kraken spot/OHLC → desk snapshot.
  */
 
-import type { ContractWindow, DeskSnapshot, MarketWindow, FearGreedSnapshot } from "./types";
+import type { ContractWindow, DeskSnapshot, MarketWindow } from "./types";
 import type { Bar1m } from "./engine";
 import type { SpotTick } from "./types";
 import { pollKraken } from "./kraken";
-import { enrichContractQuotes, fetchActiveContract } from "./kalshi";
-import { buildSnapshot } from "./desk";
-import { fetchFearGreed } from "./fear-greed";
+import { enrichContractQuotes, fetchActiveContract, fetchNext15mContract } from "./kalshi";
+import { DESK_POLL_MS, buildSnapshot, maintainWindows } from "./desk";
+
+export { DESK_POLL_MS };
 
 export interface FeedBundle {
   contract: ContractWindow | null;
+  upcoming: ContractWindow | null;
   spot: SpotTick | null;
   bars: Bar1m[];
   snapshot: DeskSnapshot;
-  fearGreed: FearGreedSnapshot | null;
   errors: string[];
   polledAt: number;
 }
@@ -25,14 +26,14 @@ export async function pollDeskFeeds(
 ): Promise<FeedBundle> {
   const errors: string[] = [];
   let contract: ContractWindow | null = null;
+  let upcoming: ContractWindow | null = null;
   let spot: SpotTick | null = null;
   let bars: Bar1m[] = [];
-  let fearGreed: FearGreedSnapshot | null = null;
 
   const results = await Promise.allSettled([
     fetchActiveContract(market),
     pollKraken(),
-    fetchFearGreed(),
+    market === "15m" ? fetchNext15mContract() : Promise.resolve(null),
   ]);
 
   if (results[0].status === "fulfilled") {
@@ -60,23 +61,26 @@ export async function pollDeskFeeds(
   }
 
   if (results[2].status === "fulfilled") {
-    fearGreed = results[2].value;
-    if (fearGreed.error) errors.push(`fearGreed: ${fearGreed.error}`);
+    upcoming = results[2].value;
   } else {
     errors.push(
-      `fearGreed: ${results[2].reason instanceof Error ? results[2].reason.message : String(results[2].reason)}`
+      `kalshi-next: ${results[2].reason instanceof Error ? results[2].reason.message : String(results[2].reason)}`
     );
   }
 
-  const snapshot = buildSnapshot(contract, spot, bars);
-  snapshot.fearGreed = fearGreed;
+  try {
+    maintainWindows({ active: contract, upcoming, spot, bars });
+  } catch (e) {
+    errors.push(`windows: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
+  const snapshot = buildSnapshot(contract, spot, bars);
   return {
     contract,
+    upcoming,
     spot,
     bars,
     snapshot,
-    fearGreed,
     errors,
     polledAt: Date.now(),
   };
@@ -87,7 +91,7 @@ export function startFeedLoop(
   opts?: { market?: MarketWindow; intervalMs?: number }
 ): () => void {
   const market = opts?.market ?? "15m";
-  const intervalMs = opts?.intervalMs ?? 8000;
+  const intervalMs = opts?.intervalMs ?? DESK_POLL_MS;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -100,10 +104,10 @@ export function startFeedLoop(
       if (!stopped) {
         onTick({
           contract: null,
+          upcoming: null,
           spot: null,
           bars: [],
           snapshot: buildSnapshot(null, null, []),
-          fearGreed: null,
           errors: [e instanceof Error ? e.message : String(e)],
           polledAt: Date.now(),
         });
@@ -120,3 +124,4 @@ export function startFeedLoop(
     if (timer) clearTimeout(timer);
   };
 }
+
