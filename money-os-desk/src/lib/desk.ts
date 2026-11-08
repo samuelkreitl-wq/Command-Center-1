@@ -186,19 +186,21 @@ export function isFreshSpotTick(spot: SpotTick | null, now: number): spot is Spo
     now - spot.ts <= 30_000 && spot.ts <= now + 5_000;
 }
 
-/** Desk poll. "Immediately" and the ten-minute tick are measured in this step. */
+/** Desk poll interval. "Immediately" means the first poll that sees a posted strike and a fresh spot. */
 export const DESK_POLL_MS = 8000;
 /** No call is committed at or after open + 5:00. */
 export const CALL_DEADLINE_MS = 5 * 60 * 1000;
-/** The one change is allowed only inside [open+10:00, open+10:00 + DESK_POLL_MS). */
+/** Minute 10 starts at open+10:00. */
 export const CHANGE_MARK_MS = 10 * 60 * 1000;
+/** The one change is allowed for the whole of minute 10: [open+10:00, open+11:00). */
+export const CHANGE_WINDOW_MS = 60 * 1000;
 
 export function tenMinuteTick(openTime: string | undefined): { start: number; end: number } | null {
   if (!openTime) return null;
   const open = Date.parse(openTime);
   if (!Number.isFinite(open)) return null;
   const start = open + CHANGE_MARK_MS;
-  return { start, end: start + DESK_POLL_MS };
+  return { start, end: start + CHANGE_WINDOW_MS };
 }
 
 /**
@@ -250,8 +252,8 @@ export function maintainWindows(input: {
 }
 
 /**
- * One change, only inside the ten-minute tick [open+10:00, open+10:00 + 8s).
- * A second change is stored as a refusal. After the tick the call is locked.
+ * One change, any time during minute 10 [open+10:00, open+11:00).
+ * A second change is stored as a refusal. From open+11:00 the call is locked.
  * A stale spot never applies a change and does not use up the one change.
  */
 export function reviseLockedCall(
@@ -272,13 +274,13 @@ export function reviseLockedCall(
   const text = reason.trim();
   if (!text) throw new Error("A change requires a reason");
   if (row.revisionRefusal) throw new Error("A second change was already refused");
-  if (now < tick.start) throw new Error("A change is only allowed at the ten-minute mark");
+  if (now < tick.start) throw new Error("A change is only allowed during minute 10");
   if (now >= tick.end) {
     replaceLock({
       ...row,
       revisionRefusal: { at: now, attempted: newCall, reason: text },
     });
-    throw new Error("The call is locked after the ten-minute mark");
+    throw new Error("The call is locked from open+11:00");
   }
   if (!isFreshSpotTick(spot, now)) throw new Error("A stale spot cannot change a call");
   if (row.revision) {
