@@ -5,8 +5,13 @@ import { DESK_POLL_MS, pollDeskFeeds } from "./lib/feeds";
 import type { FeedBundle } from "./lib/feeds";
 import { windowId } from "./lib/signal-lock";
 import type { ContractWindow, CoreLock, Direction, PaperTrade, TradeSide } from "./lib/types";
+import LivePrice from "./LivePrice";
+import SafetyBanner from "./SafetyBanner";
+import TimeframeStrip from "./TimeframeStrip";
+import SpokenOrder from "./SpokenOrder";
+import PaperDesk from "./PaperDesk";
 
-type Tab = "desk" | "journal" | "trades";
+type Tab = "desk" | "journal" | "trades" | "spoken" | "paper";
 
 const money = (n: number | null | undefined, digits = 2) =>
   typeof n === "number" && Number.isFinite(n)
@@ -259,6 +264,7 @@ function App() {
           <div><div className="brand-name">money os</div><div className="brand-caption">BTC research desk</div></div>
         </div>
         <div className="topbar-right">
+          <LivePrice />
           <div className="feed-status" data-testid="feed-status"><i className={`status-dot ${feedFresh ? "" : "offline"}`} /> <span>{feedLabel}</span><span>· 15M</span></div>
           <button className="refresh-button" onClick={() => void refresh(true)} disabled={refreshing}>
             <span className={`refresh-icon ${refreshing ? "refreshing" : ""}`}>↻</span>{refreshing ? "Updating" : "Refresh"}
@@ -266,6 +272,7 @@ function App() {
         </div>
       </header>
 
+      <SafetyBanner />
       <main className="main">
         <div className="page-heading">
           <div><div className="eyebrow">Market session / bitcoin</div><h1>Short-window desk</h1><p>Make the call. Lock the record. Practice without capital at risk.</p></div>
@@ -276,6 +283,8 @@ function App() {
           <button className={`tab ${tab === "desk" ? "active" : ""}`} onClick={() => setTab("desk")}>Desk</button>
           <button className={`tab ${tab === "journal" ? "active" : ""}`} onClick={() => setTab("journal")}>Journal <span className="tab-count">{journal.length}</span></button>
           <button className={`tab ${tab === "trades" ? "active" : ""}`} onClick={() => setTab("trades")}>Paper trade log <span className="tab-count">{trades.length}</span></button>
+          <button className={`tab ${tab === "spoken" ? "active" : ""}`} onClick={() => setTab("spoken")}>Spoken order</button>
+          <button className={`tab ${tab === "paper" ? "active" : ""}`} onClick={() => setTab("paper")}>Paper trader</button>
         </nav>
 
         {displayErrors.length > 0 && (
@@ -286,7 +295,9 @@ function App() {
         )}
 
         {tab === "desk" && (
-          loading ? <div className="grid reveal"><div className="column"><div className="panel"><div className="panel-head"><div><div className="panel-title">Active 15-minute window</div><div className="panel-kicker">Waiting for live market data</div></div></div><div className="placeholder"><div className="placeholder-mark">···</div>Connecting to the market feeds. No sample values are shown.</div></div><div className="panel"><div className="placeholder">Signal and lock details appear when live inputs arrive.</div></div></div><div className="column"><div className="panel"><div className="placeholder">Paper position entry is unavailable until a valid live contract and fresh spot are confirmed.</div></div></div></div> :
+          <>
+          <TimeframeStrip />
+          {loading ? <div className="grid reveal"><div className="column"><div className="panel"><div className="panel-head"><div><div className="panel-title">Active 15-minute window</div><div className="panel-kicker">Waiting for live market data</div></div></div><div className="placeholder"><div className="placeholder-mark">···</div>Connecting to the market feeds. No sample values are shown.</div></div><div className="panel"><div className="placeholder">Signal and lock details appear when live inputs arrive.</div></div></div><div className="column"><div className="panel"><div className="placeholder">Paper position entry is unavailable until a valid live contract and fresh spot are confirmed.</div></div></div></div> :
           <div className="grid reveal">
             <div className="column">
               <section className="panel">
@@ -379,8 +390,12 @@ function App() {
               </section>
               <div className="data-note">Research heuristic only; not financial advice. Feed availability and quotes can be incomplete or stale. Journal and paper records are stored only in this browser.</div>
             </div>
-          </div>
+          </div>}
+          </>
         )}
+
+        {tab === "spoken" && <SpokenOrder />}
+        {tab === "paper" && <PaperDesk />}
 
         {tab === "journal" && <section className="panel table-panel reveal">
           <div className="history-heading"><div><div className="panel-title">Directional journal</div><div className="panel-kicker">Immutable calls · browser-local records</div></div><button className="button-secondary" onClick={() => { syncLocalRows(); void refresh(true); }}>Refresh records</button></div>
