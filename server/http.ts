@@ -47,11 +47,17 @@ export function startBackground() {
       },
       onError: (error) => console.error("scenario refresh failed:", error instanceof Error ? error.message : error),
     });
+    const risk = createResilientLoop({
+      intervalMs: config.riskPollMs,
+      tick: () => runtime.riskTick(),
+      onError: (error) => console.error("risk tick failed:", error instanceof Error ? error.message : error),
+    });
     void paper.start();
     void horizon.start();
+    void risk.start();
     const beat = setInterval(() => runtime.markHeartbeat(), 5_000);
     beat.unref?.();
-    console.log(`paper loop every ${config.paperPollMs}ms; scenario refresh every ${config.horizonRefreshMs}ms; mode ${config.mode}`);
+    console.log(`paper loop every ${config.paperPollMs}ms; risk monitor every ${config.riskPollMs}ms; scenario refresh every ${config.horizonRefreshMs}ms; mode ${config.mode}`);
   }).catch((error) => {
     backgroundStarted = false;
     console.error("desk runtime failed to start:", error instanceof Error ? error.message : error);
@@ -77,6 +83,7 @@ export async function dispatch(req: IncomingMessage, res: ServerResponse, opts: 
     if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, await runtime.health());
     if (req.method === "GET" && url.pathname === "/api/paper/trades") return json(res, 200, { trades: await runtime.trades() });
     if (req.method === "GET" && url.pathname === "/api/paper/stats") return json(res, 200, await runtime.stats());
+    if (req.method === "GET" && url.pathname === "/api/learning/stats") return json(res, 200, await runtime.learning());
     if (req.method === "GET" && url.pathname === "/api/paper/export.csv") {
       res.statusCode = 200;
       res.setHeader("content-type", "text/csv; charset=utf-8");
@@ -103,7 +110,11 @@ export async function dispatch(req: IncomingMessage, res: ServerResponse, opts: 
     }
     if (req.method === "POST" && url.pathname === "/api/trade/propose") {
       const body = await readBody(req);
-      return json(res, 200, await runtime.propose(String(body.utterance || ""), body.count == null ? undefined : Number(body.count)));
+      return json(res, 200, await runtime.propose(String(body.utterance || ""), body.count == null ? undefined : Number(body.count), {
+        limitPrice: optionalNumber(body.limitPrice),
+        stopPercent: optionalNumber(body.stopPercent),
+        stopDollars: optionalNumber(body.stopDollars),
+      }));
     }
     if (req.method === "POST" && url.pathname === "/api/trade/execute") {
       const body = await readBody(req);
@@ -112,6 +123,10 @@ export async function dispatch(req: IncomingMessage, res: ServerResponse, opts: 
     if (req.method === "POST" && url.pathname === "/api/trade/cancel") {
       const body = await readBody(req);
       return json(res, 200, runtime.cancel(String(body.proposalId || "")));
+    }
+    if (req.method === "POST" && url.pathname === "/api/trade/cancel-resting") {
+      const body = await readBody(req);
+      return json(res, 200, await runtime.cancelResting(String(body.orderId || "")));
     }
     if (req.method === "POST" && url.pathname === "/api/test/reset" && readConfig().testReset) {
       await runtime.resetEphemeral();
@@ -122,6 +137,12 @@ export async function dispatch(req: IncomingMessage, res: ServerResponse, opts: 
     console.error("api error:", error instanceof Error ? error.message : error);
     return json(res, 500, { ok: false, message: "The desk could not complete that request." });
   }
+}
+
+function optionalNumber(value: unknown): number | null | undefined {
+  if (value == null || value === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function json(res: ServerResponse, status: number, body: unknown) {

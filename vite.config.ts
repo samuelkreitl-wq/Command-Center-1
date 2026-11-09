@@ -19,7 +19,7 @@ const proxy = {
   },
 };
 
-const apiPrefixes = ["/api/trade", "/api/paper", "/api/health", "/api/safety-net", "/api/forecast", "/api/desk", "/api/test"];
+const apiPrefixes = ["/api/trade", "/api/paper", "/api/learning", "/api/health", "/api/safety-net", "/api/forecast", "/api/desk", "/api/test"];
 
 function deskApi(): Plugin {
   return {

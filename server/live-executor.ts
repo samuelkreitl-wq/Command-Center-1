@@ -23,7 +23,7 @@ export async function placeLimitOrder(order: OrderIntent, env: Record<string, st
   const payload = {
     ticker: order.ticker,
     client_order_id: order.clientOrderId,
-    action: "buy",
+    action: order.action,
     side: order.side,
     count: order.count,
     type: "limit",
@@ -48,6 +48,25 @@ export async function placeLimitOrder(order: OrderIntent, env: Record<string, st
   }
   const orderId = String((body as { order?: { order_id?: string } }).order?.order_id || "");
   return { orderId, status: response.status, body };
+}
+
+export async function cancelLimitOrder(orderId: string, env: Record<string, string | undefined>, fetchImpl: typeof fetch): Promise<void> {
+  const pem = loadPrivateKeyPem(env);
+  const keyId = env.KALSHI_API_KEY_ID;
+  if (!pem || !keyId) throw new Error("Kalshi credentials are not configured");
+  const path = `/trade-api/v2/portfolio/orders/${orderId}`;
+  const timestamp = Date.now().toString();
+  const signature = signKalshiRequest(pem, timestamp, "DELETE", path);
+  const response = await fetchImpl(joinApi(kalshiTradeBase(env), path), {
+    method: "DELETE",
+    headers: {
+      accept: "application/json",
+      "KALSHI-ACCESS-KEY": keyId,
+      "KALSHI-ACCESS-TIMESTAMP": timestamp,
+      "KALSHI-ACCESS-SIGNATURE": signature,
+    },
+  });
+  if (!response.ok) throw new Error(`Kalshi cancel HTTP ${response.status}`);
 }
 
 export async function readExposure(ticker: string, env: Record<string, string | undefined>, fetchImpl: typeof fetch): Promise<{ blocked: boolean; side?: "yes" | "no"; count?: number; price?: number }> {

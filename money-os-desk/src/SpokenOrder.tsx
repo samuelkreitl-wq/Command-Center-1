@@ -11,6 +11,9 @@ type Proposal = {
   orderHash?: string;
   expiresAt?: number;
   order?: { ticker: string; side: string; count: number; limitPrice: number; maxCost: number };
+  stop?: { percent: number | null; dollars: number | null } | null;
+  stopSummary?: string;
+  adjusted?: { raw: number; adjusted: number; reason: string; applied: boolean };
   market?: { ticker: string; openTime?: string; closeTime: string; floorStrike: number | null; yesAsk: number; noAsk: number; status: string };
   spot?: number | null;
   parsed?: { price: number | null; timeLabel: string | null; side: string | null };
@@ -39,6 +42,9 @@ function money(n: number | null | undefined) {
 export default function SpokenOrder() {
   const [text, setText] = useState("");
   const [count, setCount] = useState("1");
+  const [limit, setLimit] = useState("");
+  const [stopPercent, setStopPercent] = useState("");
+  const [stopDollars, setStopDollars] = useState("");
   const [listening, setListening] = useState(false);
   const [speechNote, setSpeechNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -52,7 +58,13 @@ export default function SpokenOrder() {
       const response = await fetch("/api/trade/propose", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ utterance, count: Number(count) || 1 }),
+        body: JSON.stringify({
+          utterance,
+          count: Number(count) || 1,
+          ...(limit.trim() ? { limitPrice: Number(limit) } : {}),
+          ...(stopPercent.trim() ? { stopPercent: Number(stopPercent) / 100 } : {}),
+          ...(stopDollars.trim() ? { stopDollars: Number(stopDollars) } : {}),
+        }),
       });
       setResult(await response.json() as Proposal);
     } catch (error) {
@@ -143,6 +155,18 @@ export default function SpokenOrder() {
           <span>Contracts</span>
           <input aria-label="Order contracts" value={count} onChange={(event) => setCount(event.target.value)} inputMode="numeric" />
         </label>
+        <label>
+          <span>Limit price</span>
+          <input aria-label="Limit price" value={limit} onChange={(event) => setLimit(event.target.value)} inputMode="decimal" placeholder="ask" />
+        </label>
+        <label>
+          <span>Stop %</span>
+          <input aria-label="Stop percent" value={stopPercent} onChange={(event) => setStopPercent(event.target.value)} inputMode="decimal" placeholder="optional" />
+        </label>
+        <label>
+          <span>Stop $</span>
+          <input aria-label="Stop dollars" value={stopDollars} onChange={(event) => setStopDollars(event.target.value)} inputMode="decimal" placeholder="optional" />
+        </label>
         <button type="button" data-testid="mic" onClick={listen}>{listening ? "Listening" : "Speak"}</button>
         <button type="submit" data-testid="resolve" disabled={busy}>Resolve</button>
       </form>
@@ -162,10 +186,14 @@ export default function SpokenOrder() {
           <p>Official strike {result.market.floorStrike == null ? "no strike yet" : money(result.market.floorStrike)} · Spot {money(result.spot)} · YES {result.market.yesAsk.toFixed(2)} · NO {result.market.noAsk.toFixed(2)}</p>
           {result.parsed && <p>Heard price {result.parsed.price == null ? "—" : money(result.parsed.price)} at {result.parsed.timeLabel}. Path {result.path || "—"}.</p>}
           {result.forecast && (
-            <p data-testid="forecast-method">Scenario point {money(result.forecast.point)}. 68% {money(result.forecast.band68[0])}–{money(result.forecast.band68[1])}. 90% {money(result.forecast.band90[0])}–{money(result.forecast.band90[1])}. P(above strike) {result.forecast.probabilityAbove == null ? "—" : `${(result.forecast.probabilityAbove * 100).toFixed(1)}%`}. {result.forecast.method}</p>
+            <p data-testid="forecast-method">Scenario point {money(result.forecast.point)}. 68% {money(result.forecast.band68[0])}–{money(result.forecast.band68[1])}. 90% {money(result.forecast.band90[0])}–{money(result.forecast.band90[1])}. Raw P(above strike) {result.forecast.probabilityAbove == null ? "—" : `${(result.forecast.probabilityAbove * 100).toFixed(1)}%`}. {result.forecast.method}</p>
           )}
-          {result.edge && <p>Edge vs YES ask {(result.edge.yes * 100).toFixed(1)}¢ · vs NO ask {(result.edge.no * 100).toFixed(1)}¢. A model gap, not a guaranteed edge.</p>}
+          {result.adjusted && (
+            <p data-testid="forecast-adjust">Raw {(result.adjusted.raw * 100).toFixed(1)}% YES. Adjusted {(result.adjusted.adjusted * 100).toFixed(1)}% YES. {result.adjusted.reason}</p>
+          )}
+          {result.edge && <p>Edge vs YES ask {(result.edge.yes * 100).toFixed(1)}¢ · vs NO ask {(result.edge.no * 100).toFixed(1)}¢. A model gap, not a guaranteed edge. The edge uses the adjusted scenario.</p>}
           {result.order && <p>Proposed {result.order.side.toUpperCase()} · limit {result.order.limitPrice.toFixed(2)} · {result.order.count} contracts · max cost {money(result.order.maxCost)}</p>}
+          {result.stopSummary && <p data-testid="stop-line">{result.stopSummary}</p>}
         </div>
       )}
       {result?.position && <p data-testid="position-block">Position already held on {result.position.ticker}. {result.position.side.toUpperCase()} {result.position.count} @ {result.position.price.toFixed(2)}. No order button.</p>}

@@ -30,6 +30,9 @@ test("type a close, confirm once, then the same window is blocked and the next i
   await page.getByTestId("utterance").fill(fixture.windows[0].utterance);
   await page.getByTestId("resolve").click();
   await expect(page.getByTestId("confirm-order")).toBeVisible();
+  await expect(page.getByTestId("stop-line")).toBeVisible();
+  await expect(page.getByTestId("forecast-adjust")).toContainText("Raw");
+  await expect(page.getByTestId("forecast-adjust")).toContainText("Adjusted");
   await page.getByTestId("confirm-order").click();
   await expect(page.getByText(/sent once/)).toBeVisible();
   const after = await (await page.request.get("http://127.0.0.1:5099/__orders")).json() as { orders: { ticker: string }[] };

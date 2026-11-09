@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { readConfig, type DeskConfig } from "./config";
 import type { DeskStore } from "./store";
 import { assessExecute, hashOrder, isPaperProposalId, overCap, type OrderIntent, type Proposal } from "../money-os-desk/src/lib/order-gate";
+import { describeStop, evaluateLimit, evaluateStop, normalizeStop, quoteIsStale, type StopSpec } from "../money-os-desk/src/lib/risk";
+import { adjustForecast, conflictPatterns, learningStats } from "../money-os-desk/src/lib/learning";
+import { missingRecordedRows } from "../money-os-desk/src/lib/recorded-trade";
+import { cancelLimitOrder, placeLimitOrder, readExposure } from "./live-executor";
 import { parseHorizonQuestion, parseUtterance } from "../money-os-desk/src/lib/spoken-parse";
 import { resolveSpokenWindow, type ListedMarket } from "../money-os-desk/src/lib/window-resolve";
 import { forecastToClose, scenarioIsStale, shortHorizonScenario, shouldRefresh, type ShortScenario } from "../money-os-desk/src/lib/forecast";
@@ -10,12 +14,52 @@ import { evaluateTimeframes, type FrameSnapshot } from "../money-os-desk/src/lib
 import { findCrossings, projectForward, projectionDrift, roundLevels, HORIZON_STEPS, type TfId } from "../money-os-desk/src/lib/projection";
 import { TF_INTERVAL_MS } from "../money-os-desk/src/lib/timeframe";
 import { runPaperOnce } from "./paper-runner";
-import { placeLimitOrder, readExposure } from "./live-executor";
 import { fetchCloses, fetchKrakenLast, fetchMarkets } from "./public-data";
 import type { PaperRow, Watch } from "../money-os-desk/src/lib/paper-book";
 import { computeStats, rowsToCsv } from "../money-os-desk/src/lib/paper-book";
 
-type LedgerPos = { ticker: string; side: "yes" | "no"; count: number; price: number; status: "pending" | "open"; clientOrderId: string };
+type LedgerPos = {
+  ticker: string;
+  side: "yes" | "no";
+  count: number;
+  price: number;
+  status: "pending" | "open" | "resting" | "closed";
+  clientOrderId: string;
+  stop?: StopSpec | null;
+  stopFired?: boolean;
+  stopAuthorized?: boolean;
+  stopSuppressed?: boolean;
+  expiresAt?: number;
+  orderId?: string;
+};
+
+type BookQuote = {
+  yesBid: number | null;
+  yesAsk: number | null;
+  noBid: number | null;
+  noAsk: number | null;
+  ts: number | null;
+};
+
+type TrackedOrder = {
+  id: string;
+  proposalId: string;
+  ticker: string;
+  action: "buy" | "sell";
+  side: "yes" | "no";
+  limit: number;
+  count: number;
+  status: "resting" | "filled" | "cancelled" | "expired";
+  createdAt: number;
+  expiresAt: number;
+  clientOrderId: string;
+  exchangeOrderId?: string;
+  fillPrice?: number | null;
+  filledAt?: number;
+  stop: StopSpec | null;
+  stopAuthorized: boolean;
+  role: "entry" | "stop";
+};
 
 export type DeskRuntime = ReturnType<typeof createRuntime>;
 
@@ -26,8 +70,10 @@ export function createRuntime(deps: {
   now?: () => number;
   placeOrder?: (order: OrderIntent) => Promise<{ orderId: string }>;
   fetchQuote?: (ticker: string, side: "yes" | "no") => Promise<number | null>;
+  fetchBook?: (ticker: string) => Promise<BookQuote | null>;
   fetchMarkets?: () => Promise<ListedMarket[]>;
   fetchExposure?: (ticker: string) => Promise<{ blocked: boolean; side?: "yes" | "no"; count?: number; price?: number }>;
+  cancelOrder?: (orderId: string) => Promise<void>;
 }) {
   const env = deps.env ?? process.env;
   const config = readConfig(env);
@@ -43,6 +89,20 @@ export function createRuntime(deps: {
   let watches: Record<string, Watch> = {};
   let frameCache: Partial<Record<TfId, { computedAt: number; direction: "UPHILL" | "DOWNHILL" | "FLAT"; fittedLogReturn: number; slopePerBar: number; points: number; projection: unknown }>> = {};
   let scenario: ShortScenario | null = null;
+  let seeding: Promise<void> | null = null;
+
+  function ensureRecorded() {
+    if (!seeding) {
+      seeding = (async () => {
+        const rows = (await deps.store.paperRows()) as PaperRow[];
+        for (const row of missingRecordedRows(rows)) await deps.store.appendPaper(row);
+      })().catch((error) => {
+        seeding = null;
+        throw error;
+      });
+    }
+    return seeding;
+  }
 
   const withLock = <T>(ticker: string, fn: () => Promise<T>) => {
     const prev = locks.get(ticker) ?? Promise.resolve();
@@ -62,6 +122,13 @@ export function createRuntime(deps: {
   async function saveLedger(rows: Record<string, LedgerPos>) {
     await deps.store.setKv("live-ledger", JSON.stringify(rows));
   }
+  async function loadOrders(): Promise<TrackedOrder[]> {
+    const raw = await deps.store.getKv("live-orders");
+    return raw ? JSON.parse(raw) as TrackedOrder[] : [];
+  }
+  async function saveOrders(rows: TrackedOrder[]) {
+    await deps.store.setKv("live-orders", JSON.stringify(rows));
+  }
 
   async function mode(): Promise<DeskConfig["mode"]> {
     const saved = await deps.store.getKv("desk-mode");
@@ -71,7 +138,7 @@ export function createRuntime(deps: {
 
   async function positionBlock(ticker: string) {
     const row = (await ledger())[ticker];
-    if (row && (row.status === "pending" || row.status === "open")) return row;
+    if (row && (row.status === "pending" || row.status === "open" || row.status === "resting" || row.status === "closed")) return row;
     const exposure = deps.fetchExposure
       ? await deps.fetchExposure(ticker)
       : await readExposure(ticker, env, fetchImpl).catch(() => ({ blocked: true as const, side: undefined, count: undefined, price: undefined }));
@@ -117,6 +184,19 @@ export function createRuntime(deps: {
     return [...open, ...unopened, ...settled];
   }
 
+  async function bookFor(ticker: string): Promise<BookQuote | null> {
+    if (deps.fetchBook) return deps.fetchBook(ticker);
+    if (deps.fetchQuote) return null;
+    try {
+      const markets = await loadMarkets();
+      const market = markets.find((item) => item.ticker === ticker);
+      if (!market) return null;
+      return { yesBid: market.yesBid, yesAsk: market.yesAsk, noBid: market.noBid, noAsk: market.noAsk, ts: now() };
+    } catch {
+      return null;
+    }
+  }
+
   async function quote(ticker: string, side: "yes" | "no") {
     if (deps.fetchQuote) return deps.fetchQuote(ticker, side);
     const markets = await loadMarkets();
@@ -126,7 +206,7 @@ export function createRuntime(deps: {
     return ask > 0 && ask < 1 ? ask : null;
   }
 
-  async function propose(utterance: string, count?: number) {
+  async function propose(utterance: string, count?: number, extra: { limitPrice?: number | null; stopPercent?: number | null; stopDollars?: number | null } = {}) {
     const horizon = parseHorizonQuestion(utterance);
     if (horizon) {
       const current = await horizonView(false);
@@ -170,18 +250,40 @@ export function createRuntime(deps: {
       reversalHalve: !!context.deep?.reversal,
     });
     if (!forecast.ok || forecast.probabilityAbove == null) return refuse("no_forecast", forecast.ok ? "The scenario has no side." : forecast.reason);
-    const favored = forecast.probabilityAbove > 0.5 ? "yes" : forecast.probabilityAbove < 0.5 ? "no" : null;
+    await ensureRecorded();
+    const history = (await deps.store.paperRows()) as PaperRow[];
+    const tape = context.frames.map((frame) => ({ id: frame.id, direction: frame.direction, stale: frame.stale, known: frame.direction != null && !frame.stale }));
+    const adjusted = adjustForecast({ probabilityAbove: forecast.probabilityAbove, frames: tape, history });
+    const favored = adjusted.adjusted > 0.5 ? "yes" : adjusted.adjusted < 0.5 ? "no" : null;
     const side = parsed.side ?? favored;
     if (!side) return refuse("no_side", "The scenario does not favor a side. Say up or down.");
     const ask = side === "yes" ? market.yesAsk : market.noAsk;
     if (!(ask > 0) || ask >= 1) return refuse("no_ask", "No live ask for that side.");
     const contracts = count ?? parsed.count ?? 1;
-    const intent: OrderIntent = { ticker: market.ticker, side, action: "buy", count: contracts, limitPrice: Math.round(ask * 100) / 100, clientOrderId: randomUUID() };
-    const heldProposal = holdProposal(intent, { forecast, path: context.path, frames: context.frames, projection: drift, parsed });
+    let limitPrice = Math.round(ask * 100) / 100;
+    if (extra.limitPrice != null) {
+      if (!(extra.limitPrice > 0) || extra.limitPrice >= 1) return refuse("bad_limit", "Limit price must be above 0 and below 1.");
+      limitPrice = Math.round(extra.limitPrice * 10_000) / 10_000;
+    }
+    const stopParsed = resolveStop(extra, env);
+    if (stopParsed === "bad") return refuse("bad_stop", "Stop percent must be above 0 and at most 1. Stop dollars must be above 0.");
+    const intent: OrderIntent = { ticker: market.ticker, side, action: "buy", count: contracts, limitPrice, clientOrderId: randomUUID() };
+    const heldProposal = holdProposal(intent, {
+      forecast,
+      adjusted,
+      path: context.path,
+      frames: tape,
+      conflicts: conflictPatterns(tape),
+      projection: drift,
+      parsed,
+      stop: stopParsed,
+      referencePrice: ask,
+      closeTime: market.closeTime,
+    });
     if (!heldProposal.ok) return refuse(heldProposal.reason, heldProposal.message);
-    await journal("proposal", { proposalId: heldProposal.proposal.id, ticker: market.ticker, order: intent, forecast, projection: drift, path: context.path });
-    const edgeYes = forecast.probabilityAbove - market.yesAsk;
-    const edgeNo = (1 - forecast.probabilityAbove) - market.noAsk;
+    await journal("proposal", { proposalId: heldProposal.proposal.id, ticker: market.ticker, order: intent, forecast, adjusted, projection: drift, path: context.path, stop: stopParsed });
+    const edgeYes = adjusted.adjusted - market.yesAsk;
+    const edgeNo = (1 - adjusted.adjusted) - market.noAsk;
     return {
       ok: true,
       kind: "order" as const,
@@ -189,10 +291,13 @@ export function createRuntime(deps: {
       orderHash: heldProposal.proposal.orderHash,
       expiresAt: heldProposal.proposal.expiresAt,
       order: { ...intent, maxCost: intent.count * intent.limitPrice },
+      stop: stopParsed,
+      stopSummary: describeStop(stopParsed),
       market: publicMarket(market),
       spot,
       parsed: { price: parsed.price, timeLabel: parsed.time.raw, side: parsed.side },
       forecast,
+      adjusted,
       edge: { yes: edgeYes, no: edgeNo },
       timeframes: context.frames,
       path: context.path,
@@ -212,9 +317,14 @@ export function createRuntime(deps: {
     return withLock(ticker || "none", async () => {
       const current = body.proposalId ? proposals.get(body.proposalId) ?? null : null;
       const deskMode = await mode();
-      const freshAsk = current ? await quote(current.order.ticker, current.order.side) : null;
+      const bookQuote = current ? await bookFor(current.order.ticker) : null;
+      const freshAsk = bookQuote
+        ? (current?.order.side === "yes" ? bookQuote.yesAsk : bookQuote.noAsk)
+        : current ? await quote(current.order.ticker, current.order.side) : null;
+      const freshBid = bookQuote ? (current?.order.side === "yes" ? bookQuote.yesBid : bookQuote.noBid) : null;
       const liveMode = deskMode === "live" || deskMode === "both";
       const held = current && liveMode ? await positionBlock(current.order.ticker) : null;
+      const referencePrice = current && typeof current.meta.referencePrice === "number" ? current.meta.referencePrice : undefined;
       const gate = assessExecute({
         confirm: body.confirm,
         proposal: current,
@@ -222,6 +332,8 @@ export function createRuntime(deps: {
         now: now(),
         tradingEnabled: config.tradingEnabled,
         freshAsk,
+        freshBid,
+        referencePrice,
         tolerance: config.tolerance,
         maxContracts: config.maxContracts,
         maxCost: config.maxCost,
@@ -240,16 +352,53 @@ export function createRuntime(deps: {
       }
       current.used = true;
       current.confirmed = true;
+      const stop = normalizeStop(current.meta.stop as StopSpec | null);
+      const closeMs = typeof current.meta.closeTime === "string" ? Date.parse(current.meta.closeTime) : Number.POSITIVE_INFINITY;
       const book = await ledger();
-      book[current.order.ticker] = { ticker: current.order.ticker, side: current.order.side, count: current.order.count, price: current.order.limitPrice, status: "pending", clientOrderId: current.order.clientOrderId };
+      book[current.order.ticker] = { ticker: current.order.ticker, side: current.order.side, count: current.order.count, price: current.order.limitPrice, status: "pending", clientOrderId: current.order.clientOrderId, stop, stopFired: false, stopAuthorized: true, expiresAt: Number.isFinite(closeMs) ? closeMs : undefined };
       await saveLedger(book);
-      await journal("confirm", { proposalId: current.id, order: current.order });
+      await journal("confirm", { proposalId: current.id, order: current.order, stop, stopSummary: describeStop(stop) });
       try {
         const placed = deps.placeOrder ? await deps.placeOrder(current.order) : await placeLimitOrder(current.order, env, fetchImpl).then((result) => ({ orderId: result.orderId }));
-        book[current.order.ticker] = { ...book[current.order.ticker], status: "open" };
+        const fill = evaluateLimit(
+          { action: current.order.action, limit: current.order.limitPrice, cancelled: false, expiresAt: closeMs },
+          { bid: freshBid, ask: freshAsk },
+          now(),
+        );
+        const resting = fill.status !== "filled";
+        const orders = await loadOrders();
+        orders.push({
+          id: randomUUID(),
+          proposalId: current.id,
+          ticker: current.order.ticker,
+          action: current.order.action,
+          side: current.order.side,
+          limit: current.order.limitPrice,
+          count: current.order.count,
+          status: resting ? "resting" : "filled",
+          createdAt: now(),
+          expiresAt: closeMs,
+          clientOrderId: current.order.clientOrderId,
+          exchangeOrderId: placed.orderId,
+          fillPrice: fill.fillPrice,
+          filledAt: resting ? undefined : now(),
+          stop,
+          stopAuthorized: true,
+          role: "entry",
+        });
+        await saveOrders(orders);
+        book[current.order.ticker] = {
+          ...book[current.order.ticker],
+          status: resting ? "resting" : "open",
+          price: fill.fillPrice ?? current.order.limitPrice,
+          orderId: placed.orderId,
+          stop,
+          stopAuthorized: true,
+          stopFired: false,
+        };
         await saveLedger(book);
-        await journal("order", { proposalId: current.id, orderId: placed.orderId, ticker: current.order.ticker });
-        return { ok: true, kind: "executed" as const, orderId: placed.orderId, ticker: current.order.ticker };
+        await journal("order", { proposalId: current.id, orderId: placed.orderId, ticker: current.order.ticker, status: resting ? "resting" : "filled", stop });
+        return { ok: true, kind: "executed" as const, orderId: placed.orderId, ticker: current.order.ticker, status: resting ? "resting" as const : "filled" as const, stop, stopSummary: describeStop(stop) };
       } catch (error) {
         const status = (error as { status?: number }).status;
         if (status && status < 500) {
@@ -364,9 +513,178 @@ export function createRuntime(deps: {
     };
   }
 
+  async function cancelExchange(orderId: string) {
+    if (deps.cancelOrder) return deps.cancelOrder(orderId);
+    await cancelLimitOrder(orderId, env, fetchImpl);
+  }
+
+  async function riskTick() {
+    lastHeartbeat = now();
+    traderRunning = true;
+    const deskMode = await mode();
+    const liveMode = deskMode === "live" || deskMode === "both";
+    const orders = await loadOrders();
+    const book = await ledger();
+    let ordersChanged = false;
+    let bookChanged = false;
+    for (const order of orders) {
+      if (order.status !== "resting") continue;
+      if (Number.isFinite(order.expiresAt) && now() >= order.expiresAt) {
+        order.status = "expired";
+        ordersChanged = true;
+        const row = book[order.ticker];
+        if (row && (row.status === "resting" || row.status === "pending")) {
+          delete book[order.ticker];
+          bookChanged = true;
+        }
+        if (order.exchangeOrderId && config.tradingEnabled && liveMode) {
+          try {
+            await cancelExchange(order.exchangeOrderId);
+          } catch (error) {
+            await journal("limit-expire", { ticker: order.ticker, time: now(), error: error instanceof Error ? error.message : "cancel failed" });
+          }
+        }
+        await journal("limit-expire", { ticker: order.ticker, time: now(), limit: order.limit, orderId: order.exchangeOrderId ?? null });
+        continue;
+      }
+      const quoteBook = await bookFor(order.ticker);
+      if (!quoteBook || quoteIsStale(quoteBook.ts, now())) continue;
+      const bid = order.side === "yes" ? quoteBook.yesBid : quoteBook.noBid;
+      const ask = order.side === "yes" ? quoteBook.yesAsk : quoteBook.noAsk;
+      const decision = evaluateLimit({ action: order.action, limit: order.limit, cancelled: false, expiresAt: order.expiresAt }, { bid, ask }, now());
+      if (decision.status !== "filled" || decision.fillPrice == null) continue;
+      order.status = "filled";
+      order.fillPrice = decision.fillPrice;
+      order.filledAt = now();
+      ordersChanged = true;
+      if (order.action === "buy") {
+        book[order.ticker] = {
+          ticker: order.ticker,
+          side: order.side,
+          count: order.count,
+          price: decision.fillPrice,
+          status: "open",
+          clientOrderId: order.clientOrderId,
+          stop: order.stop,
+          stopFired: false,
+          stopAuthorized: order.stopAuthorized,
+          expiresAt: Number.isFinite(order.expiresAt) ? order.expiresAt : undefined,
+          orderId: order.exchangeOrderId,
+        };
+        bookChanged = true;
+      } else if (book[order.ticker]) {
+        book[order.ticker] = { ...book[order.ticker], status: "closed", stopFired: true };
+        bookChanged = true;
+      }
+      await journal("limit-fill", { ticker: order.ticker, price: decision.fillPrice, time: now(), action: order.action });
+    }
+    for (const pos of Object.values(book)) {
+      if (pos.status !== "open" || !pos.stop || pos.stopFired || pos.stopAuthorized === false) continue;
+      const quoteBook = await bookFor(pos.ticker);
+      if (!quoteBook || quoteIsStale(quoteBook.ts, now())) continue;
+      const mark = pos.side === "yes" ? quoteBook.yesBid : quoteBook.noBid;
+      const decision = evaluateStop({
+        entry: pos.price,
+        count: pos.count,
+        mark,
+        stop: pos.stop,
+        stale: false,
+        alreadyFired: !!pos.stopFired,
+      });
+      if (!decision.fire || decision.price == null || !decision.reason) {
+        if (pos.stopSuppressed) {
+          pos.stopSuppressed = false;
+          bookChanged = true;
+        }
+        continue;
+      }
+      if (!config.tradingEnabled || !liveMode) {
+        if (!pos.stopSuppressed) {
+          pos.stopSuppressed = true;
+          bookChanged = true;
+          await journal("stop", {
+            reason: decision.reason,
+            price: decision.price,
+            time: now(),
+            ticker: pos.ticker,
+            sent: false,
+            why: !config.tradingEnabled ? "trading_disabled" : "mode_paper",
+          });
+        }
+        continue;
+      }
+      const sell: OrderIntent = {
+        ticker: pos.ticker,
+        side: pos.side,
+        action: "sell",
+        count: pos.count,
+        limitPrice: decision.price,
+        clientOrderId: randomUUID(),
+      };
+      try {
+        const placed = deps.placeOrder
+          ? await deps.placeOrder(sell)
+          : await placeLimitOrder(sell, env, fetchImpl).then((result) => ({ orderId: result.orderId }));
+        pos.stopFired = true;
+        pos.status = "closed";
+        bookChanged = true;
+        orders.push({
+          id: randomUUID(),
+          proposalId: pos.orderId || pos.clientOrderId,
+          ticker: pos.ticker,
+          action: "sell",
+          side: pos.side,
+          limit: decision.price,
+          count: pos.count,
+          status: "filled",
+          createdAt: now(),
+          expiresAt: pos.expiresAt ?? now(),
+          clientOrderId: sell.clientOrderId,
+          exchangeOrderId: placed.orderId,
+          fillPrice: decision.price,
+          filledAt: now(),
+          stop: null,
+          stopAuthorized: true,
+          role: "stop",
+        });
+        ordersChanged = true;
+        await journal("stop", { reason: decision.reason, price: decision.price, time: now(), ticker: pos.ticker, sent: true, orderId: placed.orderId });
+      } catch (error) {
+        await journal("stop", { reason: decision.reason, price: decision.price, time: now(), ticker: pos.ticker, sent: false, error: error instanceof Error ? error.message : "exit failed" });
+      }
+    }
+    if (ordersChanged) await saveOrders(orders);
+    if (bookChanged) await saveLedger(book);
+  }
+
+  async function cancelResting(orderId: string) {
+    const orders = await loadOrders();
+    const order = orders.find((item) => item.id === orderId || item.exchangeOrderId === orderId || item.proposalId === orderId);
+    if (!order || order.status !== "resting") return refuse("missing", "No resting limit to cancel.");
+    order.status = "cancelled";
+    if (order.exchangeOrderId && config.tradingEnabled) {
+      const deskMode = await mode();
+      if (deskMode === "live" || deskMode === "both") {
+        try {
+          await cancelExchange(order.exchangeOrderId);
+        } catch (error) {
+          await journal("cancel", { orderId, ticker: order.ticker, time: now(), error: error instanceof Error ? error.message : "cancel failed" });
+        }
+      }
+    }
+    const book = await ledger();
+    const row = book[order.ticker];
+    if (row && (row.status === "resting" || row.status === "pending")) delete book[order.ticker];
+    await saveOrders(orders);
+    await saveLedger(book);
+    await journal("cancel", { orderId: order.id, ticker: order.ticker, time: now(), exchangeOrderId: order.exchangeOrderId ?? null });
+    return { ok: true, kind: "cancelled" as const };
+  }
+
   async function paperTick() {
     lastHeartbeat = now();
     traderRunning = true;
+    await ensureRecorded();
     const deskMode = await mode();
     if (deskMode === "live") {
       feed = "STALE";
@@ -387,7 +705,12 @@ export function createRuntime(deps: {
     lastPollAt = result.lastPollAt;
     feed = result.feed;
     lastHeartbeat = now();
-    for (const row of result.rows) await deps.store.appendPaper(row);
+    for (const row of result.rows) {
+      await deps.store.appendPaper(row);
+      if (row.kind === "exit" && row.reason === "stop") {
+        await journal("stop", { reason: row.stopReason, price: row.exit, time: row.ts, ticker: row.ticker, sent: false, book: "paper" });
+      }
+    }
   }
 
   async function health() {
@@ -409,15 +732,22 @@ export function createRuntime(deps: {
   }
 
   async function stats() {
+    await ensureRecorded();
     return computeStats((await deps.store.paperRows()) as PaperRow[]);
   }
 
   async function trades() {
+    await ensureRecorded();
     return (await deps.store.paperRows()) as PaperRow[];
   }
 
+  async function learning() {
+    await ensureRecorded();
+    return learningStats((await deps.store.paperRows()) as PaperRow[]);
+  }
+
   return {
-    config, now, propose, execute, cancel, holdProposal, contextView, horizonView, safetyStatus, paperTick, health, stats, trades, mode,
+    config, now, propose, execute, cancel, cancelResting, holdProposal, contextView, horizonView, safetyStatus, paperTick, riskTick, health, stats, trades, learning, mode,
     async setMode(next: string) {
       if (next !== "paper" && next !== "live" && next !== "both") return refuse("bad_mode", "Mode must be paper, live, or both.");
       await deps.store.setKv("desk-mode", next);
@@ -429,6 +759,7 @@ export function createRuntime(deps: {
     async resetEphemeral() {
       proposals.clear();
       await deps.store.deleteKv("live-ledger");
+      await deps.store.deleteKv("live-orders");
       await deps.store.setKv("desk-mode", config.mode);
     },
     chartsFor(closes: number[], id: TfId, lastTime: number) {
@@ -439,6 +770,20 @@ export function createRuntime(deps: {
       return findCrossings(path.map((point) => ({ t: point.t, price: point.price, low: point.low, high: point.high })), [...strikes, ...roundLevels(spot, span)]);
     },
   };
+}
+
+function envStopNumber(value: string | undefined, hi: number): number | null {
+  if (!value) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 && n <= hi ? n : null;
+}
+
+function resolveStop(extra: { stopPercent?: number | null; stopDollars?: number | null }, env: Record<string, string | undefined>): StopSpec | null | "bad" {
+  const percent = extra.stopPercent !== undefined ? extra.stopPercent : envStopNumber(env.STOP_LOSS_PERCENT, 1);
+  const dollars = extra.stopDollars !== undefined ? extra.stopDollars : envStopNumber(env.STOP_LOSS_DOLLARS, 1_000_000);
+  if (percent != null && (!(percent > 0) || percent > 1)) return "bad";
+  if (dollars != null && (!(dollars > 0) || dollars > 1_000_000)) return "bad";
+  return normalizeStop({ percent: percent ?? null, dollars: dollars ?? null });
 }
 
 function refuse(reason: string, message: string) {

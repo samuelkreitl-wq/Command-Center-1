@@ -7,6 +7,8 @@
  * when the new call is UP or DOWN, one replacement is opened at that side's ask.
  * AT STRIKE closes flat. A second change is refused and the position is left as it is.
  * The safety banner is recorded and never closes a position.
+ * A resting limit fills only through the shared limit rule. A stop stored on the
+ * position can close it through the shared stop rule. Neither path signs an order.
  *
  * ISOLATION: this module does not sign requests and does not import the live executor.
  */
@@ -16,11 +18,27 @@ import { CALL_DEADLINE_MS, DESK_POLL_MS, isFreshSpotTick, tenMinuteTick } from "
 import { exitPnl, settlementPnl, takerFeeDollars } from "./kalshi-fees";
 import { etDateKey, zonedParts } from "./et-time";
 import { windowId } from "./signal-lock";
+import { evaluateLimit, evaluateStop, quoteIsStale, type StopSpec } from "./risk";
 import type { Direction, SpotTick } from "./types";
 
 export const GAP_MS = 20 * 60 * 1000;
 
 export type PaperDirection = "UP" | "DOWN";
+
+export type FrameReading = {
+  id: string;
+  direction: string | null;
+  stale: boolean;
+  known?: boolean;
+  reconstructed?: boolean;
+};
+
+export type ConflictFlag = {
+  id: string;
+  pattern: string;
+  known: boolean;
+  reconstructed?: boolean;
+};
 
 export type PaperEntry = {
   kind: "entry";
@@ -39,12 +57,19 @@ export type PaperEntry = {
   contracts: number;
   fees: number;
   path: "aligned" | "conflict";
-  frames: { id: string; direction: string | null; stale: boolean }[];
+  frames: FrameReading[];
+  conflicts?: ConflictFlag[];
   projection: unknown;
   forecast: unknown;
+  forecastProbability?: number | null;
   safety: "none" | "watch" | "danger";
   lockCall: Direction | null;
   proposalId: string;
+  stop?: StopSpec | null;
+  source?: "paper" | "recorded";
+  reconstructed?: boolean;
+  title?: string;
+  note?: string;
 };
 
 export type PaperExit = {
@@ -56,7 +81,8 @@ export type PaperExit = {
   exit: number;
   fees: number;
   pnl: number;
-  reason: "minute10";
+  reason: "minute10" | "stop" | "limit";
+  stopReason?: string | null;
 };
 
 export type PaperSettlement = {
@@ -71,6 +97,52 @@ export type PaperSettlement = {
   pnl: number;
   correct: boolean;
   expirationValue?: string;
+  source?: "paper" | "recorded";
+  note?: string;
+};
+
+export type PaperLimit = {
+  kind: "limit";
+  id: string;
+  ts: number;
+  ticker: string;
+  action: "buy" | "sell";
+  side: "yes" | "no";
+  limit: number;
+  count: number;
+  expiresAt: number;
+  closeTime: string;
+  openTime: string;
+  direction: PaperDirection;
+  strike: number;
+  bid: number | null;
+  ask: number | null;
+  spread: number | null;
+  path: "aligned" | "conflict";
+  frames: FrameReading[];
+  conflicts?: ConflictFlag[];
+  projection: unknown;
+  forecast: unknown;
+  forecastProbability?: number | null;
+  safety: "none" | "watch" | "danger";
+  lockCall: Direction | null;
+  stop: StopSpec | null;
+  source: "paper" | "recorded";
+  title?: string;
+  note?: string;
+  reconstructed?: boolean;
+  exitReason?: "stop" | "limit";
+  stopReason?: string | null;
+};
+
+export type PaperLimitEnd = {
+  kind: "limit_end";
+  id: string;
+  ts: number;
+  ticker: string;
+  limitId: string;
+  status: "filled" | "cancelled" | "expired";
+  fillPrice: number | null;
 };
 
 export type PaperMiss = { kind: "missed"; id: string; ts: number; ticker: string; openTime: string; closeTime: string; reason: string };
@@ -78,7 +150,7 @@ export type PaperGap = { kind: "gap"; id: string; ts: number; from: number; to: 
 export type PaperSkip = { kind: "skip"; id: string; ts: number; ticker: string; reason: string };
 export type PaperRefusal = { kind: "refusal"; id: string; ts: number; ticker: string; reason: string };
 
-export type PaperRow = PaperEntry | PaperExit | PaperSettlement | PaperMiss | PaperGap | PaperSkip | PaperRefusal;
+export type PaperRow = PaperEntry | PaperExit | PaperSettlement | PaperMiss | PaperGap | PaperSkip | PaperRefusal | PaperLimit | PaperLimitEnd;
 
 export type Watch = {
   windowId: string;
@@ -108,6 +180,8 @@ export type MarketSnap = {
   yesAsk: number;
   noBid: number;
   noAsk: number;
+  quoteTs?: number | null;
+  quoteStale?: boolean;
 };
 
 export type PaperDecision = {
@@ -120,6 +194,9 @@ export type PaperDecision = {
   projection: unknown;
   forecast: unknown;
   safety: "none" | "watch" | "danger";
+  limit?: number | null;
+  stop?: StopSpec | null;
+  conflicts?: ConflictFlag[];
 };
 
 export type OpenPaper = {
@@ -129,6 +206,7 @@ export type OpenPaper = {
   count: number;
   entry: number;
   fee: number;
+  stop: StopSpec | null;
 };
 
 let seq = 0;
@@ -141,7 +219,7 @@ export function openPositions(rows: PaperRow[]): Record<string, OpenPaper> {
   const map: Record<string, OpenPaper> = {};
   for (const row of rows) {
     if (row.kind === "entry") {
-      map[row.ticker] = { ticker: row.ticker, entryId: row.id, side: row.side, count: row.contracts, entry: row.entry, fee: row.fees };
+      map[row.ticker] = { ticker: row.ticker, entryId: row.id, side: row.side, count: row.contracts, entry: row.entry, fee: row.fees, stop: row.stop ?? null };
     } else if (row.kind === "exit" || row.kind === "settlement") {
       const open = Object.values(map).find((pos) => pos.entryId === row.entryId);
       if (open) delete map[open.ticker];
@@ -169,6 +247,8 @@ export function advancePaper(opts: {
   if (opts.lastPollAt != null && opts.now - opts.lastPollAt > GAP_MS) {
     push({ kind: "gap", id: nid("gap", opts.now), ts: opts.now, from: opts.lastPollAt, to: opts.now, reason: "The paper trader was down across this span. Windows in the gap were not watched." });
   }
+  resolveResting(rows, push, opts.markets, opts.now);
+  applyStops(rows, push, opts.markets, opts.now);
   for (const market of opts.markets) {
     if (!market.openTime) continue;
     const id = windowId(market.ticker, market.closeTime);
@@ -187,11 +267,234 @@ export function advancePaper(opts: {
     } else if (stepped.event === "revision_refused") {
       push({ kind: "refusal", id: nid("refuse", opts.now), ts: opts.now, ticker: market.ticker, reason: "Second minute-10 change refused. The paper position was left unchanged." });
     }
-    if ((stepped.event === "locked" || stepped.event === "unchanged") && stepped.watch.phase === "locked" && !openPositions(rows)[market.ticker]) {
+    if ((stepped.event === "locked" || stepped.event === "unchanged") && stepped.watch.phase === "locked" && !openPositions(rows)[market.ticker] && !stoppedOut(rows, market.ticker) && !restingLimits(rows).some((limit) => limit.ticker === market.ticker)) {
       maybeEnter(rows, push, market, stepped.watch, opts);
     }
   }
+  resolveResting(rows, push, opts.markets, opts.now);
+  applyStops(rows, push, opts.markets, opts.now);
   return { watches, rows: created, lastPollAt: opts.now };
+}
+
+export function restingLimits(rows: PaperRow[]): PaperLimit[] {
+  const ended = new Set(rows.filter((row): row is PaperLimitEnd => row.kind === "limit_end").map((row) => row.limitId));
+  return rows.filter((row): row is PaperLimit => row.kind === "limit" && !ended.has(row.id));
+}
+
+export function cancelPaperLimit(rows: PaperRow[], limitId: string, now: number): PaperLimitEnd | null {
+  const limit = restingLimits(rows).find((row) => row.id === limitId);
+  if (!limit) return null;
+  return { kind: "limit_end", id: nid("lend", now), ts: now, ticker: limit.ticker, limitId, status: "cancelled", fillPrice: null };
+}
+
+function stoppedOut(rows: PaperRow[], ticker: string): boolean {
+  return rows.some((row) => row.kind === "exit" && row.ticker === ticker && row.reason === "stop");
+}
+
+function sideQuote(market: MarketSnap, side: "yes" | "no") {
+  return side === "yes" ? { bid: market.yesBid, ask: market.yesAsk } : { bid: market.noBid, ask: market.noAsk };
+}
+
+function marketIsStale(market: MarketSnap, now: number): boolean {
+  if (market.quoteStale) return true;
+  if (market.quoteTs == null) return false;
+  return quoteIsStale(market.quoteTs, now);
+}
+
+function probabilityOf(forecast: unknown): number | null {
+  const value = forecast && typeof forecast === "object" ? (forecast as { probabilityAbove?: unknown }).probabilityAbove : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function limitOrder(input: {
+  now: number;
+  market: MarketSnap;
+  side: "yes" | "no";
+  limit: number;
+  count: number;
+  direction: PaperDirection;
+  strike: number;
+  bid: number | null;
+  ask: number | null;
+  path: "aligned" | "conflict";
+  frames: FrameReading[];
+  conflicts?: ConflictFlag[];
+  projection: unknown;
+  forecast: unknown;
+  safety: "none" | "watch" | "danger";
+  lockCall: Direction | null;
+  stop: StopSpec | null;
+  action?: "buy" | "sell";
+  exitReason?: "stop" | "limit";
+  stopReason?: string | null;
+}): PaperLimit {
+  return {
+    kind: "limit",
+    id: nid("limit", input.now),
+    ts: input.now,
+    ticker: input.market.ticker,
+    action: input.action ?? "buy",
+    side: input.side,
+    limit: input.limit,
+    count: input.count,
+    expiresAt: Date.parse(input.market.closeTime),
+    closeTime: input.market.closeTime,
+    openTime: input.market.openTime || "",
+    direction: input.direction,
+    strike: input.strike,
+    bid: input.bid,
+    ask: input.ask,
+    spread: input.bid == null || input.ask == null ? null : input.ask - input.bid,
+    path: input.path,
+    frames: input.frames,
+    conflicts: input.conflicts,
+    projection: input.projection,
+    forecast: input.forecast,
+    forecastProbability: probabilityOf(input.forecast),
+    safety: input.safety,
+    lockCall: input.lockCall,
+    stop: input.stop,
+    source: "paper",
+    exitReason: input.exitReason,
+    stopReason: input.stopReason,
+  };
+}
+
+function entryFromLimit(limit: PaperLimit, fill: number, now: number): PaperEntry {
+  return {
+    kind: "entry",
+    id: nid("entry", now),
+    ts: now,
+    ticker: limit.ticker,
+    openTime: limit.openTime,
+    closeTime: limit.closeTime,
+    direction: limit.direction,
+    side: limit.side,
+    strike: limit.strike,
+    entry: fill,
+    bid: limit.bid,
+    ask: limit.ask ?? fill,
+    spread: limit.spread,
+    contracts: limit.count,
+    fees: takerFeeDollars(fill, limit.count),
+    path: limit.path,
+    frames: limit.frames,
+    conflicts: limit.conflicts,
+    projection: limit.projection,
+    forecast: limit.forecast,
+    forecastProbability: limit.forecastProbability ?? probabilityOf(limit.forecast),
+    safety: limit.safety,
+    lockCall: limit.lockCall,
+    proposalId: `paper_${limit.id}`,
+    stop: limit.stop,
+    source: limit.source,
+    reconstructed: limit.reconstructed,
+    title: limit.title,
+    note: limit.note,
+  };
+}
+
+function resolveResting(rows: PaperRow[], push: (row: PaperRow) => void, markets: MarketSnap[], now: number) {
+  const byTicker = new Map(markets.map((market) => [market.ticker, market]));
+  for (const limit of restingLimits(rows)) {
+    if (Number.isFinite(limit.expiresAt) && now >= limit.expiresAt) {
+      push({ kind: "limit_end", id: nid("lend", now), ts: now, ticker: limit.ticker, limitId: limit.id, status: "expired", fillPrice: null });
+      continue;
+    }
+    const market = byTicker.get(limit.ticker);
+    if (!market || marketIsStale(market, now)) continue;
+    const quote = sideQuote(market, limit.side);
+    const decision = evaluateLimit(
+      { action: limit.action, limit: limit.limit, cancelled: false, expiresAt: limit.expiresAt },
+      { bid: quote.bid > 0 ? quote.bid : null, ask: quote.ask > 0 ? quote.ask : null },
+      now,
+    );
+    if (decision.status !== "filled" || decision.fillPrice == null) continue;
+    push({ kind: "limit_end", id: nid("lend", now), ts: now, ticker: limit.ticker, limitId: limit.id, status: "filled", fillPrice: decision.fillPrice });
+    if (limit.action === "buy") {
+      if (openPositions(rows)[limit.ticker]) continue;
+      push(entryFromLimit(limit, decision.fillPrice, now));
+      continue;
+    }
+    const open = openPositions(rows)[limit.ticker];
+    if (!open || open.side !== limit.side) continue;
+    const exitFee = takerFeeDollars(decision.fillPrice, open.count);
+    push({
+      kind: "exit",
+      id: nid("exit", now),
+      ts: now,
+      ticker: limit.ticker,
+      entryId: open.entryId,
+      exit: decision.fillPrice,
+      fees: exitFee,
+      pnl: exitPnl({ count: open.count, entry: open.entry, entryFee: open.fee, exit: decision.fillPrice, exitFee }),
+      reason: limit.exitReason ?? "limit",
+      stopReason: limit.stopReason ?? null,
+    });
+  }
+}
+
+function applyStops(rows: PaperRow[], push: (row: PaperRow) => void, markets: MarketSnap[], now: number) {
+  for (const market of markets) {
+    if (Date.parse(market.closeTime) <= now) continue;
+    const open = openPositions(rows)[market.ticker];
+    if (!open?.stop) continue;
+    const quote = sideQuote(market, open.side);
+    const mark = quote.bid > 0 && quote.bid < 1 ? quote.bid : null;
+    const decision = evaluateStop({
+      entry: open.entry,
+      count: open.count,
+      mark,
+      stop: open.stop,
+      stale: marketIsStale(market, now),
+      alreadyFired: false,
+    });
+    if (!decision.fire || decision.price == null || decision.reason == null) continue;
+    const fill = evaluateLimit(
+      { action: "sell", limit: decision.price, cancelled: false, expiresAt: Date.parse(market.closeTime) },
+      { bid: mark, ask: quote.ask > 0 ? quote.ask : null },
+      now,
+    );
+    if (fill.status !== "filled" || fill.fillPrice == null) continue;
+    const entry = rows.find((row): row is PaperEntry => row.kind === "entry" && row.id === open.entryId);
+    const limit = limitOrder({
+      now,
+      market,
+      side: open.side,
+      limit: decision.price,
+      count: open.count,
+      direction: open.side === "yes" ? "UP" : "DOWN",
+      strike: entry?.strike ?? market.strike ?? 0,
+      bid: quote.bid,
+      ask: quote.ask,
+      path: entry?.path ?? "aligned",
+      frames: entry?.frames ?? [],
+      conflicts: entry?.conflicts,
+      projection: entry?.projection ?? null,
+      forecast: entry?.forecast ?? null,
+      safety: entry?.safety ?? "none",
+      lockCall: entry?.lockCall ?? null,
+      stop: null,
+      action: "sell",
+      exitReason: "stop",
+      stopReason: decision.reason,
+    });
+    push(limit);
+    push({ kind: "limit_end", id: nid("lend", now), ts: now, ticker: market.ticker, limitId: limit.id, status: "filled", fillPrice: fill.fillPrice });
+    const exitFee = takerFeeDollars(fill.fillPrice, open.count);
+    push({
+      kind: "exit",
+      id: nid("exit", now),
+      ts: now,
+      ticker: market.ticker,
+      entryId: open.entryId,
+      exit: fill.fillPrice,
+      fees: exitFee,
+      pnl: exitPnl({ count: open.count, entry: open.entry, entryFee: open.fee, exit: fill.fillPrice, exitFee }),
+      reason: "stop",
+      stopReason: decision.reason,
+    });
+  }
 }
 
 function maybeEnter(rows: PaperRow[], push: (row: PaperRow) => void, market: MarketSnap, watch: Watch, opts: { now: number; decisionFor: (market: MarketSnap, watch: Watch) => PaperDecision | null }) {
@@ -202,32 +505,27 @@ function maybeEnter(rows: PaperRow[], push: (row: PaperRow) => void, market: Mar
     push({ kind: "skip", id: nid("skip", opts.now), ts: opts.now, ticker: market.ticker, reason: "No forecast side or no live ask. Nothing was paper-filled." });
     return;
   }
-  const fees = takerFeeDollars(decision.ask, decision.count);
   const side = decision.side;
-  push({
-    kind: "entry",
-    id: nid("entry", opts.now),
-    ts: opts.now,
-    ticker: market.ticker,
-    openTime: market.openTime || "",
-    closeTime: market.closeTime,
-    direction: side === "yes" ? "UP" : "DOWN",
+  const limit = decision.limit != null && decision.limit > 0 && decision.limit < 1 ? decision.limit : decision.ask;
+  push(limitOrder({
+    now: opts.now,
+    market,
     side,
+    limit,
+    count: decision.count,
+    direction: side === "yes" ? "UP" : "DOWN",
     strike: watch.strike ?? market.strike ?? 0,
-    entry: decision.ask,
     bid: decision.bid,
     ask: decision.ask,
-    spread: decision.bid == null ? null : decision.ask - decision.bid,
-    contracts: decision.count,
-    fees,
     path: decision.path,
     frames: decision.frames,
+    conflicts: decision.conflicts,
     projection: decision.projection,
     forecast: decision.forecast,
     safety: decision.safety,
     lockCall: watch.revisedCall ?? watch.lockedCall,
-    proposalId: `paper_${nid("p", opts.now)}`,
-  });
+    stop: decision.stop ?? null,
+  }));
 }
 
 function reversePosition(rows: PaperRow[], push: (row: PaperRow) => void, market: MarketSnap, next: Direction, now: number) {
@@ -253,31 +551,24 @@ function reversePosition(rows: PaperRow[], push: (row: PaperRow) => void, market
   const ask = side === "yes" ? market.yesAsk : market.noAsk;
   if (!(ask > 0) || ask >= 1) return;
   const count = open?.count ?? 1;
-  const fees = takerFeeDollars(ask, count);
-  push({
-    kind: "entry",
-    id: nid("entry", now),
-    ts: now,
-    ticker: market.ticker,
-    openTime: market.openTime || "",
-    closeTime: market.closeTime,
-    direction: next,
+  push(limitOrder({
+    now,
+    market,
     side,
+    limit: ask,
+    count,
+    direction: next,
     strike: market.strike ?? 0,
-    entry: ask,
     bid: side === "yes" ? market.yesBid : market.noBid,
     ask,
-    spread: (side === "yes" ? market.yesAsk - market.yesBid : market.noAsk - market.noBid),
-    contracts: count,
-    fees,
     path: "aligned",
     frames: [],
     projection: null,
     forecast: null,
     safety: "none",
     lockCall: next,
-    proposalId: `paper_${nid("p", now)}`,
-  });
+    stop: null,
+  }));
 }
 
 function settleIfFinal(rows: PaperRow[], push: (row: PaperRow) => void, market: MarketSnap, now: number) {

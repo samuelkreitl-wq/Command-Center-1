@@ -10,6 +10,7 @@ export type DeskConfig = {
   ttlMs: number;
   paperPollMs: number;
   horizonRefreshMs: number;
+  riskPollMs: number;
   testReset: boolean;
 };
 
@@ -26,6 +27,7 @@ export function readConfig(env: Record<string, string | undefined> = process.env
     ttlMs: positive(env.PROPOSAL_TTL_MS, 60_000),
     paperPollMs: positive(env.PAPER_POLL_MS, 20_000),
     horizonRefreshMs: positive(env.SHORT_HORIZON_REFRESH_MS, 60 * 60 * 1000),
+    riskPollMs: positive(env.RISK_POLL_MS, 10_000),
     testReset: env.DESK_TEST_RESET === "1",
   };
 }

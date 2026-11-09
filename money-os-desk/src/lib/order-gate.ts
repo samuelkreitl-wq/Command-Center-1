@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 export type OrderIntent = {
   ticker: string;
   side: "yes" | "no";
-  action: "buy";
+  action: "buy" | "sell";
   count: number;
   limitPrice: number;
   clientOrderId: string;
@@ -63,6 +63,9 @@ export function assessExecute(input: {
   now: number;
   tradingEnabled: boolean;
   freshAsk: number | null;
+  freshBid?: number | null;
+  /** Quote the proposal was built from. Defaults to the limit, so a buy at the ask is unchanged. */
+  referencePrice?: number | null;
   tolerance?: number;
   maxContracts?: number;
   maxCost?: number;
@@ -79,8 +82,10 @@ export function assessExecute(input: {
   if (!input.modeAllowsLive) return { ok: false, reason: "mode_paper", message: "Desk mode is paper. Real and demo orders stay off." };
   if (input.positionBlocked) return { ok: false, reason: "position_held", message: `Position already held on ${input.proposal.order.ticker}` };
   const tolerance = input.tolerance ?? DEFAULT_PRICE_TOLERANCE;
-  if (input.freshAsk == null || Math.abs(input.freshAsk - input.proposal.order.limitPrice) > tolerance) {
-    return { ok: false, reason: "price_moved", message: "The live ask moved beyond the tolerance. Nothing was sent." };
+  const reference = input.referencePrice ?? input.proposal.order.limitPrice;
+  const quoted = input.proposal.order.action === "sell" ? (input.freshBid ?? null) : input.freshAsk;
+  if (quoted == null || Math.abs(quoted - reference) > tolerance) {
+    return { ok: false, reason: "price_moved", message: "The live quote moved beyond the tolerance. Nothing was sent." };
   }
   return { ok: true };
 }
