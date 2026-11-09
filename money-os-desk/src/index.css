@@ -26,7 +26,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #8bc99e; outline-offset: 2px; }
 
 .app-shell { min-height: 100dvh; }
-.topbar { height: 72px; display:flex; align-items:center; justify-content:space-between; padding:0 5.3vw; border-bottom:1px solid var(--line); background:#f5f7f0; }
+.topbar { height: auto; min-height: 72px; flex-wrap: wrap; display:flex; align-items:center; justify-content:space-between; padding:8px 5.3vw; border-bottom:1px solid var(--line); background:#f5f7f0; gap: 10px; }
 .brand { display:flex; align-items:center; gap:12px; color:var(--ink); }
 .brand-mark { width:34px; height:34px; border-radius:10px; background:#173c31; display:grid; place-items:center; color:#c5e6cb; font:500 17px var(--mono); }
 .brand-name { font-weight:800; letter-spacing:-.045em; font-size:17px; }
@@ -198,4 +198,41 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
 }
+
+.live-btc { display:flex; align-items:center; gap:6px; background:#07080a; color:#e8edf2; border-radius:8px; padding:6px 8px; font:11px "DM Mono", monospace; }
+.live-btc strong { font-weight:500; }
+.live-btc em { font-style:normal; color:#3d9a76; font-size:9px; letter-spacing:.08em; }
+.safety-banner { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:baseline; margin:0; padding:12px 5.3vw; background:#7a2424; color:#f6e4e1; font-size:13px; }
+.safety-banner.watch { background:#6b3030; }
+.safety-banner.danger { background:#8d1f1f; }
+.safety-banner strong { letter-spacing:.08em; }
+.tf-strip { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 14px; }
+.tf-strip span { background:#07080a; color:#e8edf2; border-radius:6px; padding:6px 8px; font:10px "DM Mono", monospace; display:inline-flex; gap:6px; align-items:baseline; }
+.tf-strip .stale { color:#c9b3a4; }
+.tf-strip .uphill { color:#8ecfb2; }
+.tf-strip .downhill { color:#e7b2a4; }
+.tf-strip .conflict { background:#8d1f1f; }
+.tf-strip small { color:#9aa7a1; }
+.spoken-shell { background:#07080a; color:#e8edf2; border-radius:12px; padding:18px; display:grid; gap:14px; }
+.spoken-shell h2, .spoken-shell h3 { margin:0; letter-spacing:-.04em; }
+.spoken-shell p { margin:0; color:#c5d0d6; font-size:13px; line-height:1.5; }
+.spoken-head, .spoken-form, .spoken-actions, .stat-grid { display:flex; flex-wrap:wrap; gap:10px; align-items:end; justify-content:space-between; }
+.spoken-form { align-items:end; }
+.spoken-form label, .spoken-head label { display:grid; gap:6px; font-size:11px; color:#c5d0d6; flex:1; min-width:160px; }
+.spoken-shell input, .spoken-shell select { background:#10141a; color:#e8edf2; border:1px solid #243038; border-radius:6px; padding:10px; font:12px "DM Mono", monospace; }
+.spoken-shell button, .spoken-shell a { background:#3d9a76; color:#07110e; border:0; border-radius:7px; padding:10px 12px; font-weight:800; text-decoration:none; }
+.spoken-shell button[data-testid="cancel-order"] { background:#1c242b; color:#e8edf2; }
+.spoken-card, .horizon-panel { border:1px solid #243038; border-radius:8px; padding:12px; display:grid; gap:6px; }
+.scenario-label { color:#8ecfb2; font-size:12px; }
+.spoken-note { color:#e7b2a4; }
+.stat-grid div { background:#10141a; border-radius:8px; padding:10px; min-width:120px; }
+.stat-grid span { display:block; color:#9aa7a1; font-size:10px; letter-spacing:.08em; text-transform:uppercase; }
+.equity { width:100%; max-width:420px; background:#10141a; border-radius:8px; }
+.equity polyline { fill:none; stroke:#3d9a76; stroke-width:2; }
+.spoken-shell svg .band { fill:rgba(61,154,118,.22); }
+.spoken-shell svg .path { fill:none; stroke:#3d9a76; stroke-width:2; }
+.spoken-shell svg .cross { fill:#e8edf2; }
+.crossing-table { width:100%; border-collapse:collapse; font:11px "DM Mono", monospace; }
+.crossing-table th, .crossing-table td { text-align:left; padding:6px; border-bottom:1px solid #243038; }
+.spoken-shell ul { margin:0; padding-left:18px; color:#c5d0d6; }
 
