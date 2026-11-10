@@ -70,7 +70,7 @@
         "cost_dollars": { "type": "number" },
         "max_loss_dollars": { "type": "number" },
         "max_profit_dollars": { "type": "number" },
-        "method": { "type": "string", "description": "e.g. 'quarter Kelly capped at $5', 'arb equal-payout split'" },
+        "method": { "type": "string", "description": "e.g. 'quarter Kelly suggestion', 'arb equal-payout split'; Samuel's approved amount is final" },
         "cash_needed_on_shard": { "type": "object", "additionalProperties": { "type": "number" } },
         "transfer_needed": { "type": "string", "description": "Describe any shard transfer; never executed without Samuel's yes" }
       }

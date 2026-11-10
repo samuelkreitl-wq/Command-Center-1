@@ -1,7 +1,7 @@
 # Money Desk Playbook
 
 How Samuel's money bot, sports-arbitrage tool and reality checker judge a bet before he ever sees it.
-Version 1.0, Nov 10, 2026. The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
+Version 1.1, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size). The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
 
 ---
 
@@ -9,6 +9,7 @@ Version 1.0, Nov 10, 2026. The shared folder and record format are in `/home/box
 
 1. **Never auto-bet.** No bot, script, routine or paper trader places, cancels or changes an order by itself. That includes the BTC15 desk and the paper trader.
 2. **Every trade needs Samuel's explicit yes, for that specific trade** (market, side, size, price). A yes to one order doesn't carry over to another. Shard transfers need their own yes too.
+   **Stake size is whatever Samuel approves.** There are no fixed dollar caps per pick, per day or per arb. money bot proposes a suggested stake, Samuel approves the amount, and money bot places exactly that amount, no more and no less.
 3. **A 15-minute window's time means its END time.** "The 4:15 window" runs 4:00 to 4:15 ET.
 4. **Use Kalshi's official strike only.** Copy the strike and ticker exactly as the API gives them (e.g. `T74249.99`, a target of `74179.25`). Never round them or restate them from a screenshot.
 5. **Be honest about what wasn't verified.** Anything stale, assumed or model-only goes in `unverified[]` and is said out loud.
@@ -69,7 +70,7 @@ To make the payout equal whichever outcome wins, with a total stake T:
 
 - **Kalshi legs:** contracts = floor(stakeᵢ / (P + f)). Recompute with the fee for that order size, which is rounded per order, and re-check that S < 1 after rounding.
 - **Sportsbook legs:** round to the book's minimum unit, then recompute the payouts. Note the gap between the worst and best payouts.
-- **Cap per arb:** the smallest of $25, 10% of the cash across the venues involved, or the smallest leg's known limit. Start at $5–10 a leg until a venue's fills and settlement have been seen working.
+- **No fixed dollar cap per arb.** money bot suggests a total stake T; Samuel approves the amount. The only practical limits are what can actually fill: depth at the ask, each sportsbook's known limit, and the cash on each shard. Flag those in the record, but they don't cap what Samuel may approve.
 
 ### 2.4 Kill-checks before an arb is PASS
 - **Settlement rules match exactly.** Overtime and extra innings count? Push or void rules? What happens if a game is postponed, or the starting pitcher or player changes? Kalshi may settle at "last fair price" if an event is cancelled. Any mismatch means FAIL, or price the void.
@@ -82,10 +83,9 @@ To make the payout equal whichever outcome wins, with a total stake T:
 ### 2.5 +EV picks that aren't arbs
 - **Fair probability** comes from a no-vig sharp price, or from a model: a realized-vol lognormal model for crypto, forecast blends against the settlement station for weather.
 - **Kelly fraction for a binary contract bought at P:** f* = (p − P) / (1 − P).
-- **Stake = ¼ × f* × bankroll on that shard** (quarter Kelly), with these hard caps:
-  - **Per pick:** the smaller of $5 or 5% of the shard's cash.
-  - **Per day:** across all picks, the smaller of $15 or 25% of total cash.
-  - **Below threshold:** never bet if the worst-case edge after fees is under 2¢ per contract, or under 3% of the price.
+- **Suggested stake = ¼ × f* × bankroll on that shard** (quarter Kelly). This is a suggestion only, shown with every pick.
+  - **No fixed per-pick, per-day or per-arb dollar caps.** Samuel approves the amount, and money bot places exactly what he approves, up to whatever cash he has. His approval is the only limit.
+  - **Below threshold:** never pitch a pick if the worst-case edge after fees is under 2¢ per contract, or under 3% of the price.
 - **Parlays:** multiply the leg probabilities **only for truly independent legs.** Crypto legs move together, and so do same-game legs. Use a correlation haircut (Cutline uses 12% on same-game legs) or price the combo directly. Kalshi combos sit on shard 1 and are priced through an RFQ, which is a write that needs approval. Compare the RFQ quote with the product of the fair probabilities, not with the product of the asks.
 
 ---
