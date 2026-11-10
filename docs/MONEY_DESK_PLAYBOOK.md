@@ -1,7 +1,7 @@
 # Money Desk Playbook
 
 How Samuel's money bot, sports-arbitrage tool and reality checker judge a bet before he ever sees it.
-Version 1.3, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size; hourly pick schedule added; mandatory reality check before any pick is shown). The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
+Version 1.4, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size; hourly pick schedule added; mandatory reality check before any pick is shown; approval password required). The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
 
 ---
 
@@ -10,6 +10,11 @@ Version 1.3, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size; 
 1. **Never auto-bet.** No bot, script, routine or paper trader places, cancels or changes an order by itself. That includes the BTC15 desk and the paper trader.
 2. **Every trade needs Samuel's explicit yes, for that specific trade** (market, side, size, price). A yes to one order doesn't carry over to another. Shard transfers need their own yes too.
    **Stake size is whatever Samuel approves.** There are no fixed dollar caps per pick, per day or per arb. money bot proposes a suggested stake, Samuel approves the amount, and money bot places exactly that amount, no more and no less.
+   **Approval password.** An approval counts only if it comes with Samuel's approval password, whether he gives it by voice or types "yes" in chat (e.g. "yes, $20 on the XRP pick, password ____"). money bot checks the password against the secret stored as the environment variable `MONEY_DESK_APPROVAL_PASSWORD` on money bot's computer. If the password is missing or wrong, the approval is **rejected**, nothing is placed, and the pick stays a proposal. money bot says it was rejected, never repeats or hints at the password, and asks again.
+   - The password is **never** written in this playbook, the repo, the shared folder, logs, records or chat summaries. It lives only in the bot's secret store (a gitignored, never-committed location).
+   - **Until a password has been set and confirmed, no bet can be placed.** money bot asks Samuel to choose one through the secure secret prompt.
+   - Buttons and webhooks can never approve, even with a password. Approval only counts from Samuel himself, by voice or in this chat.
+   - Every trade still needs its own approval, with the password, for that specific market, side and amount.
 3. **A 15-minute window's time means its END time.** "The 4:15 window" runs 4:00 to 4:15 ET.
 4. **Use Kalshi's official strike only.** Copy the strike and ticker exactly as the API gives them (e.g. `T74249.99`, a target of `74179.25`). Never round them or restate them from a screenshot.
 5. **Be honest about what wasn't verified.** Anything stale, assumed or model-only goes in `unverified[]` and is said out loud.
@@ -167,7 +172,7 @@ Every trade still needs Samuel's explicit yes on that specific trade and amount 
 2. Pick up new `inbox/arbitrage/` records.
 3. Run the reality check on each and write it to `inbox/reality-check/`.
 4. Re-pull prices for the PASS records, and for WATCH records whose trigger has hit. Then present each one to Samuel with "needs your yes".
-5. Only after he says yes to a specific trade: place exactly that trade, then report the order ID, fill, fees and balance.
+5. Only after he says yes to a specific trade **with the correct approval password**: place exactly that trade, then report the order ID, fill, fees and balance.
 6. Move expired records to `archive/YYYY-MM-DD/`. Log the results so the model learns how well its picks were calibrated: Brier score, and hit rate by bucket.
 
 ## 7. Known sources (as of Nov 10, 2026)
