@@ -1,7 +1,7 @@
 # Money Desk Playbook
 
 How Samuel's money bot, sports-arbitrage tool and reality checker judge a bet before he ever sees it.
-Version 1.2, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size; hourly pick schedule added). The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
+Version 1.3, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size; hourly pick schedule added; mandatory reality check before any pick is shown). The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
 
 ---
 
@@ -92,7 +92,13 @@ To make the payout equal whichever outcome wins, with a total stake T:
 
 ## 3. Reality check
 
-Run this on every arb or pick before it reaches Samuel. Answer each question in `reasons[]` or `unverified[]`.
+**Mandatory gate.** Every suggested pick, from every source and every hourly run across every Kalshi tab, must have this 12-question reality check run on it, on fresh data, **before it is shown to Samuel.** No exceptions, and no showing a pick "pending review".
+- **PASS:** presented as a suggested pick.
+- **WATCH:** presented only with the WATCH flag and its `watch_trigger` shown on the same line.
+- **FAIL:** logged in full (record, `picks-log.csv` line and reality-check record), but **never suggested or presented.**
+- A pick with no reality-check record is treated as FAIL.
+
+Answer each question in `reasons[]` or `unverified[]`.
 
 | # | Question | FAIL if |
 |---|---|---|
@@ -136,12 +142,12 @@ Every hour, **on the hour (ET)**, money bot produces a NEW set of suggested pick
 
 ### 5.1 Coverage: every Kalshi tab, every hour
 - Scan **every** Kalshi category/tab that exists at scan time. Pull the live category list from the API (`GET /series` / `GET /events` categories) rather than a fixed list, so new tabs are picked up automatically. At minimum: **Crypto** (BTC, ETH, SOL, XRP, including 15-minute and hourly markets), **Weather**, **Commodities**, **Sports**, **Economics**, **Financials** (indices), **Politics**, **Companies**, **Culture/Entertainment**, **Science/Tech**, **World**, **Combos**, and any other tab listed.
-- Each tab gets **at least one suggested pick every hour**: the best candidate in that tab by worst-case edge after fees, then depth.
+- Each tab gets **at least one candidate every hour**: the best candidate in that tab by worst-case edge after fees, then depth. Every candidate goes through the mandatory reality check (§3) before anything is shown. If a tab's top candidate FAILs, try that tab's next-best candidate. If every candidate in a tab FAILs, report the tab as "no pick this hour (all candidates failed reality check)" and log the failures.
 - If no market in a tab clears the threshold (§2.5), still log that tab's best candidate, but label it `WATCH` and add the summary line "best available, no real edge". Never dress up a no-edge pick as a PASS. Picks that clear the threshold and the reality check are `PASS`.
 
 ### 5.2 Hourly log (every pick, every hour)
 - Write each pick as a schema record in `hourly/YYYY-MM-DD/HH00/`, named `YYYY-MM-DD_HH00_money-bot_<tab>-<slug>.json`.
-- Also append one line per pick to `hourly/picks-log.csv` with these columns: `timestamp_et, tab, market_title, ticker, side, price, fair_prob, edge_cents_after_fees, stake_suggestion_contracts, stake_suggestion_dollars, verdict, close_time_et, record_path`.
+- Also append one line per pick to `hourly/picks-log.csv` with these columns: `timestamp_et, tab, market_title, ticker, side, price, fair_prob, edge_cents_after_fees, stake_suggestion_contracts, stake_suggestion_dollars, verdict, reality_check_verdict, reality_check_path, shown_to_samuel, close_time_et, record_path`.
 - **Never delete or rewrite log lines.** Settled results are appended later as separate lines tagged `result`, for calibration (§6).
 
 ### 5.3 Still-good picks are saved, not dropped
@@ -150,7 +156,7 @@ Every hour, **on the hour (ET)**, money bot produces a NEW set of suggested pick
 - `saved-picks/` is shown **alongside** each hour's new picks. When a saved pick stops being good (its edge is gone, its price moved, or it's past `expires_at` or closed), move it to `archive/YYYY-MM-DD/` with a note on why.
 
 ### 5.4 Each hour's report to Samuel
-Send two blocks: **New this hour**, with one pick per tab ranked by edge, and **Still good (saved)**. Each line gives the market, side, price, fair probability, edge, suggested stake, closing time ET, and "needs your yes".
+Only reality-checked PASS picks, and WATCH picks with their flag shown, appear in the report. FAIL picks are logged but never shown as suggestions. Saved still-good picks must re-pass the reality check every hour to stay in the report. Send two blocks: **New this hour**, with one pick per tab ranked by edge, and **Still good (saved)**. Each line gives the market, side, price, fair probability, edge, suggested stake, closing time ET, and "needs your yes".
 
 ### 5.5 Approval
 Every trade still needs Samuel's explicit yes on that specific trade and amount before anything is placed. An hourly pick is a proposal, never an order.
