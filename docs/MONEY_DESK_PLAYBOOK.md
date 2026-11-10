@@ -1,7 +1,7 @@
 # Money Desk Playbook
 
 How Samuel's money bot, sports-arbitrage tool and reality checker judge a bet before he ever sees it.
-Version 1.1, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size). The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
+Version 1.2, Nov 10, 2026 (stake caps removed; Samuel's approval sets the size; hourly pick schedule added). The shared folder and record format are in `/home/box/shared/money-desk/README.md` and `money-desk.schema.json`.
 
 ---
 
@@ -130,7 +130,32 @@ When a summary is read aloud to Samuel, use those three lines plus the closing t
 
 ---
 
-## 5. Daily loop (money bot)
+## 5. Hourly pick schedule (money bot)
+
+Every hour, **on the hour (ET)**, money bot produces a NEW set of suggested picks.
+
+### 5.1 Coverage: every Kalshi tab, every hour
+- Scan **every** Kalshi category/tab that exists at scan time. Pull the live category list from the API (`GET /series` / `GET /events` categories) rather than a fixed list, so new tabs are picked up automatically. At minimum: **Crypto** (BTC, ETH, SOL, XRP, including 15-minute and hourly markets), **Weather**, **Commodities**, **Sports**, **Economics**, **Financials** (indices), **Politics**, **Companies**, **Culture/Entertainment**, **Science/Tech**, **World**, **Combos**, and any other tab listed.
+- Each tab gets **at least one suggested pick every hour**: the best candidate in that tab by worst-case edge after fees, then depth.
+- If no market in a tab clears the threshold (§2.5), still log that tab's best candidate, but label it `WATCH` and add the summary line "best available, no real edge". Never dress up a no-edge pick as a PASS. Picks that clear the threshold and the reality check are `PASS`.
+
+### 5.2 Hourly log (every pick, every hour)
+- Write each pick as a schema record in `hourly/YYYY-MM-DD/HH00/`, named `YYYY-MM-DD_HH00_money-bot_<tab>-<slug>.json`.
+- Also append one line per pick to `hourly/picks-log.csv` with these columns: `timestamp_et, tab, market_title, ticker, side, price, fair_prob, edge_cents_after_fees, stake_suggestion_contracts, stake_suggestion_dollars, verdict, close_time_et, record_path`.
+- **Never delete or rewrite log lines.** Settled results are appended later as separate lines tagged `result`, for calibration (§6).
+
+### 5.3 Still-good picks are saved, not dropped
+- At each hourly run, re-price every earlier pick that hasn't closed yet.
+- If it is **still a good pick**, meaning it's still PASS (or WATCH with its trigger met), its worst-case edge still clears the threshold, and it has re-passed the reality check on fresh data, copy it to `saved-picks/` as `<original-name>__still-good_<HH00>.json`, with an updated price, edge and `data_timestamps`. The original stays in `hourly/` unchanged.
+- `saved-picks/` is shown **alongside** each hour's new picks. When a saved pick stops being good (its edge is gone, its price moved, or it's past `expires_at` or closed), move it to `archive/YYYY-MM-DD/` with a note on why.
+
+### 5.4 Each hour's report to Samuel
+Send two blocks: **New this hour**, with one pick per tab ranked by edge, and **Still good (saved)**. Each line gives the market, side, price, fair probability, edge, suggested stake, closing time ET, and "needs your yes".
+
+### 5.5 Approval
+Every trade still needs Samuel's explicit yes on that specific trade and amount before anything is placed. An hourly pick is a proposal, never an order.
+
+## 6. Daily loop (money bot)
 
 1. Pull live data and write candidate records to `outbox/`.
 2. Pick up new `inbox/arbitrage/` records.
@@ -139,7 +164,7 @@ When a summary is read aloud to Samuel, use those three lines plus the closing t
 5. Only after he says yes to a specific trade: place exactly that trade, then report the order ID, fill, fees and balance.
 6. Move expired records to `archive/YYYY-MM-DD/`. Log the results so the model learns how well its picks were calibrated: Brier score, and hit rate by bucket.
 
-## 6. Known sources (as of Nov 10, 2026)
+## 7. Known sources (as of Nov 10, 2026)
 
 - **Cutline:** the sports-arbitrage and parlay tool, in private repo `samuelkreitl-wq/quiet-dune-wood-otter`.
   - Open PR #1 (not a draft) adds The Odds API feed (free tier 500 credits a month, needs `ODDS_API_KEY`).
