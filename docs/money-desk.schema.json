@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://samuelkreitl-wq/money-desk/money-desk.schema.json",
+  "title": "Money Desk record",
+  "description": "One pick, arbitrage, or reality-check verdict exchanged between Samuel's bots via /home/box/shared/money-desk. Proposals only: no record ever authorizes a bet.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "created_at", "market", "venues", "side", "price", "fair_prob", "edge", "stake_suggestion", "confidence", "verdict", "reasons", "data_timestamps", "expires_at", "summary"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "id": { "type": "string", "description": "Optional unique id; default = file name without .json" },
+    "source": { "type": "string", "enum": ["arbitrage", "reality-check", "money-bot", "other"], "description": "Which bot/skill wrote it" },
+    "source_bot": { "type": "string", "description": "Bot name and/or agent id, e.g. 'money bot (568853df-...)'" },
+    "created_at": { "type": "string", "format": "date-time", "description": "ISO 8601 with America/New_York offset, e.g. 2026-11-10T16:20:00-05:00" },
+    "market": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string" },
+        "ticker": { "type": "string", "description": "Kalshi ticker exactly as the API returns it (official strike), e.g. KXBTCD-26NOV1017-T74249.99" },
+        "event_ticker": { "type": "string" },
+        "category": { "type": "string", "enum": ["sports", "crypto", "weather", "commodities", "economics", "politics", "other"] },
+        "window_start_et": { "type": "string", "description": "For 15-min windows: start time ET. The window's NAME/time is its END." },
+        "close_time_et": { "type": "string", "format": "date-time" },
+        "settlement_source": { "type": "string", "description": "Copied from the rules text, e.g. 'CF Benchmarks BRTI 60s avg', 'The Weather Company CLINYC'" },
+        "kalshi_shard": { "type": "integer", "description": "exchange_index from the market (0 general, 1 combos, 2 crypto/commodities, 3 sports)" }
+      }
+    },
+    "venues": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["venue", "side", "price"],
+        "properties": {
+          "venue": { "type": "string", "description": "kalshi, draftkings, fanduel, polymarket, ..." },
+          "selection": { "type": "string" },
+          "side": { "type": "string", "enum": ["YES", "NO", "BACK", "LAY", "OVER", "UNDER", "HOME", "AWAY", "DRAW"] },
+          "price": { "type": "number", "description": "Kalshi: dollars 0-1 (ask). Books: American odds." },
+          "price_format": { "type": "string", "enum": ["kalshi_dollars", "american", "decimal"] },
+          "depth_at_price": { "type": "number", "description": "Contracts (Kalshi) or known limit ($) at this price" },
+          "stake": { "type": "number", "description": "Dollars on this leg (arbs)" },
+          "quote_time": { "type": "string", "format": "date-time" },
+          "url": { "type": "string" }
+        }
+      }
+    },
+    "side": { "type": "string", "description": "Headline side, e.g. 'NO' or 'arb: KXNBAGAME...-NYK YES + FanDuel MIL ML'" },
+    "price": { "type": "number", "description": "Headline entry price (Kalshi dollars) or combined cost per $1 payout for an arb" },
+    "fair_prob": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Model/no-vig probability the side wins; null for pure arbs" },
+    "fair_prob_source": { "type": "string", "description": "e.g. 'DK no-vig (power method)', 'lognormal 120m realized vol', 'NWS forecast + obs'" },
+    "fair_prob_range": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "[low, high] across model variants" },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cents_per_contract_after_fees"],
+      "properties": {
+        "cents_per_contract_after_fees": { "type": "number" },
+        "pct_after_fees": { "type": "number", "description": "Arb: guaranteed return % on total stake after fees" },
+        "fee_dollars": { "type": "number", "description": "Total taker fees for the suggested size, Kalshi = ceil(0.07*C*P*(1-P)) to the cent" }
+      }
+    },
+    "stake_suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contracts", "cost_dollars", "max_loss_dollars"],
+      "properties": {
+        "contracts": { "type": "number" },
+        "cost_dollars": { "type": "number" },
+        "max_loss_dollars": { "type": "number" },
+        "max_profit_dollars": { "type": "number" },
+        "method": { "type": "string", "description": "e.g. 'quarter Kelly capped at $5', 'arb equal-payout split'" },
+        "cash_needed_on_shard": { "type": "object", "additionalProperties": { "type": "number" } },
+        "transfer_needed": { "type": "string", "description": "Describe any shard transfer; never executed without Samuel's yes" }
+      }
+    },
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "verdict": { "type": "string", "enum": ["PASS", "FAIL", "WATCH"], "description": "PASS = worth showing Samuel; FAIL = do not bet; WATCH = re-check at a trigger" },
+    "watch_trigger": { "type": "string", "description": "For WATCH: what would flip it, e.g. 'ask <= 0.85' or 'after 8:30 CPI'" },
+    "reasons": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "unverified": { "type": "array", "items": { "type": "string" }, "description": "Anything assumed or not checked" },
+    "correlated_with": { "type": "array", "items": { "type": "string" }, "description": "Existing positions/picks this overlaps" },
+    "data_timestamps": {
+      "type": "object",
+      "description": "Name -> ISO time of each data pull, e.g. {\"kalshi\": \"...\", \"kraken_spot\": \"...\", \"draftkings\": \"...\"}",
+      "additionalProperties": { "type": "string" },
+      "minProperties": 1
+    },
+    "expires_at": { "type": "string", "format": "date-time", "description": "After this the record is stale and must not be acted on (usually market close or quote time + 15 min)" },
+    "reviewed_by": { "type": "string", "description": "Filename of the reality-check record that reviewed this one" },
+    "summary": { "type": "array", "items": { "type": "string" }, "minItems": 3, "maxItems": 3, "description": "3-line human summary: what, why, risk" },
+    "approval": { "type": "string", "enum": ["none", "awaiting_samuel", "approved_by_samuel", "declined_by_samuel"], "default": "none", "description": "Only Samuel changes this; bots never set approved_by_samuel themselves" }
+  }
+}
