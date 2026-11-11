@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { ArbSection, AssistantSection, HourlySection, OrdersSection, type OrderDraft } from "./sections";
 import { buildSnapshot, listJournal, listTradeLog, lockFromLive, placePaper, reviseLockedCall, setCustomReference, settleWindow, tenMinuteTick } from "./lib/desk";
 import { DESK_POLL_MS, pollDeskFeeds } from "./lib/feeds";
 import type { FeedBundle } from "./lib/feeds";
 import { windowId } from "./lib/signal-lock";
 import type { ContractWindow, CoreLock, Direction, PaperTrade, TradeSide } from "./lib/types";
+import { windowNameByEnd } from "./lib/window-name";
 
 type Tab = "desk" | "journal" | "trades";
+type Section = "hourly" | "btc" | "arb" | "assistant" | "orders";
 
 const money = (n: number | null | undefined, digits = 2) =>
   typeof n === "number" && Number.isFinite(n)
@@ -41,6 +44,12 @@ const validContract = (contract: ContractWindow | null) =>
 const validQuote = (price: number) => Number.isFinite(price) && price > 0 && price < 1;
 
 function App() {
+  const [section, setSection] = useState<Section>("btc");
+  const [draft, setDraft] = useState<OrderDraft | null>(null);
+  const prepare = (next: OrderDraft) => {
+    setDraft(next);
+    setSection("orders");
+  };
   const [tab, setTab] = useState<Tab>("desk");
   const [bundle, setBundle] = useState<FeedBundle | null>(null);
   const [loading, setLoading] = useState(true);
@@ -256,7 +265,7 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">M</div>
-          <div><div className="brand-name">money os</div><div className="brand-caption">BTC research desk</div></div>
+          <div><div className="brand-name">Samuel's Command Center</div><div className="brand-caption">Money desk</div></div>
         </div>
         <div className="topbar-right">
           <div className="feed-status" data-testid="feed-status"><i className={`status-dot ${feedFresh ? "" : "offline"}`} /> <span>{feedLabel}</span><span>· 15M</span></div>
@@ -265,8 +274,19 @@ function App() {
           </button>
         </div>
       </header>
+      <nav className="section-nav" aria-label="Command center">
+        <button className={section === "hourly" ? "active" : ""} onClick={() => setSection("hourly")}>Hourly picks</button>
+        <button className={section === "btc" ? "active" : ""} onClick={() => setSection("btc")}>BTC 15</button>
+        <button className={section === "arb" ? "active" : ""} onClick={() => setSection("arb")}>Sports arb</button>
+        <button className={section === "assistant" ? "active" : ""} onClick={() => setSection("assistant")}>Assistant</button>
+        <button className={section === "orders" ? "active" : ""} onClick={() => setSection("orders")}>Place bet</button>
+      </nav>
+      {section === "hourly" && <HourlySection onPrepare={prepare} />}
+      {section === "arb" && <ArbSection />}
+      {section === "assistant" && <AssistantSection />}
+      {section === "orders" && <OrdersSection draft={draft} />}
 
-      <main className="main">
+      {section === "btc" && <main className="main">
         <div className="page-heading">
           <div><div className="eyebrow">Market session / bitcoin</div><h1>Short-window desk</h1><p>Make the call. Lock the record. Practice without capital at risk.</p></div>
           <div className="time-stamp">AUTO POLL · 8 SEC<br />{bundle ? `LAST CHECK ${dateTime(bundle.polledAt)}` : "WAITING FOR FIRST CHECK"}</div>
@@ -293,7 +313,7 @@ function App() {
                 <div className="panel-head"><div><div className="panel-title">Active 15-minute window</div><div className="panel-kicker">{feedFresh ? "Contract terms · live market" : "Contract terms · STALE"}</div></div><span className="window-badge">BTC / 15M</span></div>
                 {contract ? <>
                   <div className="contract-body">
-                    <div className="contract-name-row"><div><div className="contract-name">Bitcoin above or below strike</div><div className="ticker">{contract.ticker}</div></div><div className="subtle-label">{validContract(contract) ? `CLOSES IN ${minutesText(contract.closeTime)}` : "WINDOW EXPIRED"}</div></div>
+                    <div className="contract-name-row"><div><div className="contract-name">Bitcoin above or below strike</div><div className="ticker">{contract.ticker}</div><div className="ticker" data-testid="window-name">{windowNameByEnd(contract.closeTime)} · named by its end</div></div><div className="subtle-label">{validContract(contract) ? `CLOSES IN ${minutesText(contract.closeTime)}` : "WINDOW EXPIRED"}</div></div>
                     <div className="contract-metrics">
                       <div className="metric"><div className="metric-label">{feedFresh ? "Live spot" : "Spot · STALE"}</div><div className="metric-value large">{isFreshSpot(bundle) ? money(bundle?.spot?.price) : "—"}</div></div>
                       <div className="metric"><div className="metric-label">Strike</div><div className="metric-value">{contract.strike != null && contract.strike > 0 ? money(contract.strike) : "—"}</div></div>
@@ -391,7 +411,7 @@ function App() {
         {tab === "trades" && <div className="column reveal">
           <section className="panel table-panel">
             <div className="history-heading"><div><div className="panel-title">Paper trade log</div><div className="panel-kicker">Simulated YES / NO positions · no exchange execution</div></div><button className="button-secondary" onClick={() => { syncLocalRows(); void refresh(true); }}>Refresh records</button></div>
-            {trades.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No paper positions recorded.<br />The desk never sends orders to an exchange.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Opened</th><th>Side</th><th>Size</th><th>Entry ask</th><th>Strike</th><th>Status</th><th>End price</th><th>Paper P&amp;L</th></tr></thead><tbody>{trades.map((trade) => <tr key={trade.id}><td className="table-primary">{trade.ticker}<br /><span style={{ color: "#8a958e" }}>{trade.market}</span></td><td>{dateTime(trade.openedAt)}</td><td className={trade.side === "YES" ? "result-good" : "result-bad"}>{trade.side}</td><td>{trade.size}</td><td>{trade.entry.toFixed(3)}</td><td>{money(trade.strike)}</td><td>{trade.settledAt ? "Settled" : "Open"}</td><td>{trade.endPx == null ? "—" : money(trade.endPx)}</td><td className={trade.pnl == null ? "" : trade.pnl >= 0 ? "result-good" : "result-bad"}>{trade.pnl == null ? "—" : `${trade.pnl >= 0 ? "+" : ""}${trade.pnl.toFixed(2)}`}</td></tr>)}</tbody></table></div>}
+            {trades.length === 0 ? <div className="placeholder"><div className="placeholder-mark">—</div>No paper positions recorded.<br />Paper stays in this browser. A live order is only on Place bet, after you confirm that exact trade and the approval password checks.</div> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Window</th><th>Opened</th><th>Side</th><th>Size</th><th>Entry ask</th><th>Strike</th><th>Status</th><th>End price</th><th>Paper P&amp;L</th></tr></thead><tbody>{trades.map((trade) => <tr key={trade.id}><td className="table-primary">{trade.ticker}<br /><span style={{ color: "#8a958e" }}>{trade.market}</span></td><td>{dateTime(trade.openedAt)}</td><td className={trade.side === "YES" ? "result-good" : "result-bad"}>{trade.side}</td><td>{trade.size}</td><td>{trade.entry.toFixed(3)}</td><td>{money(trade.strike)}</td><td>{trade.settledAt ? "Settled" : "Open"}</td><td>{trade.endPx == null ? "—" : money(trade.endPx)}</td><td className={trade.pnl == null ? "" : trade.pnl >= 0 ? "result-good" : "result-bad"}>{trade.pnl == null ? "—" : `${trade.pnl >= 0 ? "+" : ""}${trade.pnl.toFixed(2)}`}</td></tr>)}</tbody></table></div>}
             <div className="data-note" style={{ padding: "14px 20px" }}>Paper records and settlements exist only in this browser. No funds, orders, or exchange accounts are involved.</div>
           </section>
           <section className="panel">
@@ -402,7 +422,7 @@ function App() {
             </form>
           </section>
         </div>}
-      </main>
+      </main>}
     </div>
   );
 }

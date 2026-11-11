@@ -10,6 +10,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["money-os-desk/src", "vite.config.ts"]
+    "include": ["money-os-desk/src", "server", "vite.config.ts"]
 }
 
