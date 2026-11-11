@@ -13,6 +13,7 @@ import { runScan, serverEdgeFor } from "./scan.js";
 import { startHourlyScanner } from "./scheduler.js";
 import { deskRoot, readHistory, readOrderLog } from "./store.js";
 import { readFileSync } from "node:fs";
+import { loadTradeLog } from "./trade-log.js";
 
 const HOST = "0.0.0.0";
 const PORT = Number(process.env.PORT || 5000);
@@ -101,6 +102,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, env: 
         price: Number(body.price),
       }, { env, fetchMarket, fetchBook: fetchOrderbook });
       send(res, 200, preview);
+      return true;
+    }
+    if (req.method === "GET" && url.pathname === "/api/desk/trade-log") {
+      send(res, 200, await loadTradeLog({ env }));
       return true;
     }
     if (req.method === "POST" && url.pathname === "/api/desk/orders") {
