@@ -31,6 +31,18 @@ Read from the environment. Do not commit values. Names:
 | `MONEY_DESK_ASSUMED_BANKROLL` | Optional dollars used only to illustrate quarter Kelly when shard cash cannot be read. |
 | `MONEY_DESK_DATA_DIR` | Optional directory for the pick log and the order log. |
 | `KALSHI_API_BASE` | Optional API origin override. |
+| `MONEY_DESK_FEED_URL` | Pick feed JSON for the Trade Log tab. HTTPS only. Defaults to `data/money-desk-feed.json` on branch `money-desk-data`. |
+
+## Trade log
+
+The Trade Log tab is read-only. It loads when opened, when you press Refresh, and every five minutes. It does not place or cancel an order.
+
+Two sources:
+
+- Kalshi, server-side, using `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PEM`. The server calls `GET /portfolio/fills`, `/portfolio/settlements`, `/portfolio/positions`, and `/portfolio/balance`. When the balance payload lists exchange shards, fills and positions are read on each shard. Settlements have no shard filter; one read returns every shard, and each row carries `exchange_index`. Fills and settlements omit `subaccount`, so they include every subaccount the key can see. Positions stay on Kalshi's default, the primary subaccount. Keys never go to the browser. If they are missing, the tab says **Kalshi keys not set**.
+- The pick feed. Picks, skipped orders, and notes come from that JSON. The shape is [`docs/money-desk-feed.schema.json`](./docs/money-desk-feed.schema.json): `generated_at`, `picks_today[]`, `pick_log[]` (`timestamp`, `tab`, `market`, `ticker`, `side`, `price`, `fair_prob`, `edge`, `stake`, `verdict`, `close_time`, `fills[]`, `skipped[]`, optional `notes`), and `pnl` (`realized`, `unrealized`, `total`, `by_day[]`).
+
+Live Kalshi data wins wherever both sources cover the same thing. A successful fills read replaces feed fills. Realized P&L is settlement payout minus cost and fees. Unrealized P&L is the open mark (bid/ask midpoint of the held side) minus the cost basis. The total is withheld when a quote is missing. Feed P&L is shown only when Kalshi did not return settlements or positions, and it is labeled as the feed.
 
 A template with empty values is in [`.env.example`](./.env.example). The real `.env` is gitignored. Nothing in this repo places an order on its own: the hourly job and the assistant cannot call the order endpoint.
 
