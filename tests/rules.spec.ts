@@ -84,12 +84,14 @@ test("no official strike shows no call, then an exact posted strike locks AT STR
   await expect(page.getByTestId("feed-status")).toContainText("LIVE FEED");
 });
 
-test("one change is allowed on the ten-minute tick and then the call stays locked", async ({ page }) => {
-  const openMs = Date.parse("2026-11-07T00:00:00.000Z");
-  const open = new Date(openMs).toISOString();
-  const close = new Date(openMs + 15 * 60_000).toISOString();
+const OPEN_MS = Date.parse("2026-11-07T00:00:00.000Z");
+const MINUTE_10 = OPEN_MS + 10 * 60_000;
+
+async function openLockedDesk(page: Page) {
+  const open = new Date(OPEN_MS).toISOString();
+  const close = new Date(OPEN_MS + 15 * 60_000).toISOString();
   const ticker = "TEN-WINDOW";
-  await page.clock.install({ time: openMs + 9 * 60_000 });
+  await page.clock.install({ time: OPEN_MS + 9 * 60_000 });
   await page.addInitScript(({ row }) => {
     if (!localStorage.getItem("moneyos.btc.journal.v1")) {
       localStorage.setItem("moneyos.btc.journal.v1", JSON.stringify([row]));
@@ -98,7 +100,7 @@ test("one change is allowed on the ten-minute tick and then the call stays locke
     row: {
       windowId: `${ticker}::${close}`,
       ticker, market: "15m", lockedCall: "UP", confidence: 62,
-      lockedAt: openMs + 30_000, startPx: 80100, strike: 80000,
+      lockedAt: OPEN_MS + 30_000, startPx: 80100, strike: 80000,
       closeTime: close, openTime: open, action: "WATCH", factors: ["Official strike"],
     },
   });
@@ -110,26 +112,117 @@ test("one change is allowed on the ten-minute tick and then the call stays locke
     }],
   });
   await page.goto("/");
+  await expect(page.getByTestId("feed-status")).toContainText("LIVE FEED");
   await expect(page.getByTestId("revise-form")).toHaveCount(0);
-  await page.clock.fastForward(60_000);
+}
+
+async function saveChange(page: Page, call: string, reason: string) {
+  await page.getByLabel("Revised call").selectOption(call);
+  await page.getByLabel("Change reason").fill(reason);
+  await page.getByRole("button", { name: "Save change" }).click();
+}
+
+async function journalCall(page: Page): Promise<{ lockedCall: string; revisedCall?: string; revision?: { reason: string }; revisionRefusal?: { attempted: string } }> {
+  return page.evaluate(() => {
+    const raw = localStorage.getItem("moneyos.btc.journal.v1");
+    const rows = raw ? JSON.parse(raw) as Array<{ lockedCall: string; revisedCall?: string; revision?: { reason: string }; revisionRefusal?: { attempted: string } }> : [];
+    return rows[0];
+  });
+}
+
+test("a change at 10:00 is saved, and a second change at 10:30 is refused", async ({ page }) => {
+  await openLockedDesk(page);
+  await page.clock.pauseAt(MINUTE_10);
   await expect(page.getByTestId("revise-form")).toBeVisible();
-  await page.getByLabel("Revised call").selectOption("DOWN");
-  await page.getByLabel("Change reason").fill("spot flipped");
-  await page.getByRole("button", { name: "Save change" }).click();
-  await expect(page.getByTestId("revision-note")).toContainText("spot flipped");
-  await page.getByLabel("Revised call").selectOption("AT STRIKE");
-  await page.getByLabel("Change reason").fill("second try");
-  await page.getByRole("button", { name: "Save change" }).click();
+  expect(await page.evaluate(() => Date.now())).toBe(MINUTE_10);
+  await saveChange(page, "DOWN", "at 10:00");
+  await expect(page.getByTestId("revision-note")).toContainText("at 10:00");
+  await page.clock.pauseAt(MINUTE_10 + 8_000);
+  await expect(page.getByTestId("revise-form")).toBeVisible();
+  await page.clock.pauseAt(MINUTE_10 + 30_000);
+  expect(await page.evaluate(() => Date.now())).toBe(MINUTE_10 + 30_000);
+  await expect(page.getByTestId("revise-form")).toBeVisible();
+  await saveChange(page, "AT STRIKE", "second try");
   await expect(page.getByTestId("revision-refusal")).toContainText("Second change refused");
-  await page.clock.fastForward(8_000);
   await expect(page.getByTestId("revise-form")).toHaveCount(0);
+  const row = await journalCall(page);
+  expect(row.lockedCall).toBe("UP");
+  expect(row.revisedCall).toBe("DOWN");
+  expect(row.revision?.reason).toBe("at 10:00");
+  expect(row.revisionRefusal?.attempted).toBe("AT STRIKE");
   await page.reload();
   await expect(page.getByTestId("revision-refusal")).toBeVisible();
   await expect(page.getByTestId("revise-form")).toHaveCount(0);
   await page.getByRole("button", { name: /^Journal/ }).click();
   await expect(page.locator("tbody tr")).toContainText("UP → DOWN");
-  await expect(page.locator("tbody tr")).toContainText("spot flipped");
+  await expect(page.locator("tbody tr")).toContainText("at 10:00");
   await expect(page.locator("tbody tr")).toContainText("Second change refused");
+});
+
+test("a first change at 10:30 is allowed", async ({ page }) => {
+  await openLockedDesk(page);
+  await page.clock.pauseAt(MINUTE_10 + 30_000);
+  expect(await page.evaluate(() => Date.now())).toBe(MINUTE_10 + 30_000);
+  await expect(page.getByTestId("revise-form")).toBeVisible();
+  await saveChange(page, "DOWN", "at 10:30");
+  await expect(page.getByTestId("revision-note")).toContainText("at 10:30");
+  const row = await journalCall(page);
+  expect(row.revisedCall).toBe("DOWN");
+  expect(row.revision?.reason).toBe("at 10:30");
+  expect(row.revisionRefusal).toBeUndefined();
+});
+
+test("a change at 10:59.9 is allowed and the form closes once the clock reaches 11:00", async ({ page }) => {
+  await openLockedDesk(page);
+  await page.clock.pauseAt(MINUTE_10 + 59_900);
+  expect(await page.evaluate(() => Date.now())).toBe(MINUTE_10 + 59_900);
+  await expect(page.getByTestId("revise-form")).toBeVisible();
+  await saveChange(page, "DOWN", "at 10:59.9");
+  await expect(page.getByTestId("revision-note")).toContainText("at 10:59.9");
+  await page.clock.runFor(1_000);
+  expect(await page.evaluate(() => Date.now())).toBeGreaterThanOrEqual(OPEN_MS + 11 * 60_000);
+  await expect(page.getByTestId("revise-form")).toHaveCount(0);
+  const row = await journalCall(page);
+  expect(row.lockedCall).toBe("UP");
+  expect(row.revisedCall).toBe("DOWN");
+  expect(row.revision?.reason).toBe("at 10:59.9");
+  expect(row.revisionRefusal).toBeUndefined();
+  await page.getByRole("button", { name: /^Journal/ }).click();
+  await expect(page.locator("tbody tr")).toContainText("UP → DOWN");
+  await expect(page.locator("tbody tr")).toContainText("at 10:59.9");
+});
+
+test("at 11:00 the call is locked and a change cannot be submitted", async ({ page }) => {
+  await openLockedDesk(page);
+  await page.clock.pauseAt(MINUTE_10 + 59_900);
+  await expect(page.getByTestId("revise-form")).toBeVisible();
+  await page.clock.runFor(1_000);
+  expect(await page.evaluate(() => Date.now())).toBeGreaterThanOrEqual(OPEN_MS + 11 * 60_000);
+  await expect(page.getByTestId("revise-form")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save change" })).toHaveCount(0);
+  const row = await journalCall(page);
+  expect(row.lockedCall).toBe("UP");
+  expect(row.revisedCall).toBeUndefined();
+  expect(row.revision).toBeUndefined();
+  expect(row.revisionRefusal).toBeUndefined();
+});
+
+test("a stale spot during minute 10 cannot change the call", async ({ page }) => {
+  await openLockedDesk(page);
+  await page.clock.pauseAt(MINUTE_10 + 15_000);
+  await expect(page.getByTestId("revise-form")).toBeVisible();
+  await page.unroute("**/api/kraken/**");
+  await page.route("**/api/kraken/**", (route) => route.fulfill({ status: 503, body: "down" }));
+  await page.clock.pauseAt(MINUTE_10 + 15_000 + 35_000);
+  expect(await page.evaluate(() => Date.now())).toBe(MINUTE_10 + 50_000);
+  await expect(page.getByTestId("feed-status")).toContainText("STALE");
+  await expect(page.getByTestId("feed-status")).not.toContainText("LIVE");
+  await expect(page.getByTestId("revise-form")).toHaveCount(0);
+  const row = await journalCall(page);
+  expect(row.lockedCall).toBe("UP");
+  expect(row.revisedCall).toBeUndefined();
+  expect(row.revision).toBeUndefined();
+  expect(row.revisionRefusal).toBeUndefined();
 });
 
 test("an already-open window is MISSED and a dead feed is STALE, not live", async ({ page }) => {

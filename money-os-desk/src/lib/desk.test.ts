@@ -4,8 +4,8 @@ import { buildSnapshot, lockFromLive, placePaper, settleWindow, setCustomReferen
 import { loadLocks, loadTrades } from "./journal";
 import { openPaperTrade, settlePaperTrade } from "./paper";
 import { mapMarketToContract, mapScheduledMarket, fetchOrderbookAsks } from "./kalshi";
-import { maintainWindows, reviseLockedCall } from "./desk";
-import type { ContractWindow } from "./types";
+import { CHANGE_WINDOW_MS, maintainWindows, reviseLockedCall, tenMinuteTick } from "./desk";
+import type { ContractWindow, SpotTick } from "./types";
 
 const store = new Map<string, string>();
 Object.defineProperty(globalThis, "localStorage", {
@@ -153,18 +153,26 @@ test("no official strike is no call; the posted strike locks immediately, includ
   assert.equal(bare?.strike, null);
 });
 
-test("one change is saved on the ten-minute tick; a second and any later attempt stay refused", () => {
-  const openMs = Date.parse("2026-11-07T00:00:00.000Z");
+const MINUTE_10_OPEN = Date.parse("2026-11-07T00:00:00.000Z");
+
+function freshSpot(at: number, price = 79900): SpotTick {
+  return { price, ts: at, source: "manual" };
+}
+
+/** Watch the window with no strike, then commit on the poll that posts floor_strike. */
+function commitOnPostedStrike(ticker: string, openMs = MINUTE_10_OPEN): string {
   const open = new Date(openMs).toISOString();
   const close = new Date(openMs + 15 * 60_000).toISOString();
   const waiting: ContractWindow = {
-    ticker: "HALF", series: "KXBTC15M", market: "15m", strike: null,
+    ticker, series: "KXBTC15M", market: "15m", strike: null,
     openTime: open, closeTime: close, yesAsk: 0.4, noAsk: 0.6,
   };
   const seenAt = openMs + 30_000;
-  const spot = { price: 80100, ts: seenAt, source: "manual" as const };
-  maintainWindows({ active: null, upcoming: waiting, spot, now: seenAt });
-  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.lockedCall, null);
+  maintainWindows({
+    active: null, upcoming: waiting,
+    spot: { price: 80100, ts: seenAt, source: "manual" }, now: seenAt,
+  });
+  assert.equal(loadLocks().find((row) => row.ticker === ticker)?.lockedCall, null);
   const postedAt = openMs + 60_000;
   maintainWindows({
     active: null,
@@ -172,51 +180,115 @@ test("one change is saved on the ten-minute tick; a second and any later attempt
     spot: { price: 80100, ts: postedAt, source: "manual" },
     now: postedAt,
   });
-  const locked = loadLocks().find((row) => row.ticker === "HALF");
+  const locked = loadLocks().find((row) => row.ticker === ticker);
   assert.equal(locked?.lockedCall, "UP");
   assert.equal(locked?.strike, 80000);
-  const tick = openMs + 10 * 60_000;
+  assert.equal(locked?.awaitingStrike, false);
+  return locked!.windowId;
+}
+
+test("minute 10 is the whole minute [open+10:00, open+11:00)", () => {
+  const open = new Date(MINUTE_10_OPEN).toISOString();
+  const tick = tenMinuteTick(open);
+  assert.equal(tick?.start, MINUTE_10_OPEN + 10 * 60_000);
+  assert.equal(tick?.end, MINUTE_10_OPEN + 11 * 60_000);
+  assert.equal(tick!.end - tick!.start, CHANGE_WINDOW_MS);
+  assert.equal(tenMinuteTick(undefined), null);
+});
+
+test("one change is allowed at 10:00, 10:30, and 10:59.9, and refused at 11:00", () => {
+  const id = commitOnPostedStrike("HALF");
+  const start = MINUTE_10_OPEN + 10 * 60_000;
   assert.throws(
-    () => reviseLockedCall(locked!.windowId, "DOWN", "too early", tick - 1, spot),
-    /ten-minute/,
+    () => reviseLockedCall(id, "DOWN", "too early", start - 1, freshSpot(start - 1)),
+    /during minute 10/,
   );
-  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revision, undefined);
+  assert.equal(loadLocks().find((row) => row.windowId === id)?.revision, undefined);
+  assert.equal(loadLocks().find((row) => row.windowId === id)?.revisionRefusal, undefined);
+
+  const cases = [
+    { ticker: "AT-1000", at: start, reason: "at 10:00" },
+    { ticker: "AT-1030", at: start + 30_000, reason: "at 10:30" },
+    { ticker: "AT-1059", at: start + 59_900, reason: "at 10:59.9" },
+  ];
+  for (const sample of cases) {
+    const windowId = commitOnPostedStrike(sample.ticker);
+    const changed = reviseLockedCall(windowId, "DOWN", sample.reason, sample.at, freshSpot(sample.at));
+    assert.equal(changed.lockedCall, "UP");
+    assert.equal(changed.revisedCall, "DOWN");
+    assert.equal(changed.revision?.from, "UP");
+    assert.equal(changed.revision?.to, "DOWN");
+    assert.equal(changed.revision?.reason, sample.reason);
+    assert.equal(changed.revision?.at, sample.at);
+    assert.equal(changed.revisionRefusal, undefined);
+  }
+
+  const lateId = commitOnPostedStrike("AT-1100");
+  const lockedAt = start + CHANGE_WINDOW_MS;
+  assert.equal(lockedAt, MINUTE_10_OPEN + 11 * 60_000);
   assert.throws(
-    () => reviseLockedCall(locked!.windowId, "DOWN", "stale", tick, { price: 80100, ts: tick - 31_000, source: "manual" }),
-    /stale/,
+    () => reviseLockedCall(lateId, "DOWN", "at 11:00", lockedAt, freshSpot(lockedAt)),
+    /locked from open\+11:00/,
   );
-  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revision, undefined);
-  const fresh = { price: 79900, ts: tick, source: "manual" as const };
-  const changed = reviseLockedCall(locked!.windowId, "DOWN", "spot flipped", tick, fresh);
-  assert.equal(changed.lockedCall, "UP");
+  const late = loadLocks().find((row) => row.windowId === lateId);
+  assert.equal(late?.lockedCall, "UP");
+  assert.equal(late?.revisedCall, undefined);
+  assert.equal(late?.revision, undefined);
+  assert.equal(late?.revisionRefusal?.attempted, "DOWN");
+  assert.equal(late?.revisionRefusal?.reason, "at 11:00");
+  assert.equal(late?.revisionRefusal?.at, lockedAt);
+  assert.throws(
+    () => reviseLockedCall(lateId, "AT STRIKE", "later still", lockedAt + 5_000, freshSpot(lockedAt + 5_000)),
+    /already refused/,
+  );
+  assert.equal(loadLocks().find((row) => row.windowId === lateId)?.revisionRefusal?.reason, "at 11:00");
+});
+
+test("a second change during minute 10 is refused and stays refused", () => {
+  const id = commitOnPostedStrike("SECOND");
+  const start = MINUTE_10_OPEN + 10 * 60_000;
+  const changed = reviseLockedCall(id, "DOWN", "spot flipped", start, freshSpot(start));
   assert.equal(changed.revisedCall, "DOWN");
   assert.equal(changed.revision?.reason, "spot flipped");
+  const mid = start + 30_000;
   assert.throws(
-    () => reviseLockedCall(locked!.windowId, "AT STRIKE", "again", tick + 1000, fresh),
+    () => reviseLockedCall(id, "AT STRIKE", "again", mid, freshSpot(mid, 80000)),
     /second change is refused/,
   );
-  const refused = loadLocks().find((row) => row.ticker === "HALF");
+  const refused = loadLocks().find((row) => row.windowId === id);
+  assert.equal(refused?.lockedCall, "UP");
   assert.equal(refused?.revisedCall, "DOWN");
+  assert.equal(refused?.revision?.reason, "spot flipped");
   assert.equal(refused?.revisionRefusal?.attempted, "AT STRIKE");
+  assert.equal(refused?.revisionRefusal?.reason, "again");
   assert.throws(
-    () => reviseLockedCall(locked!.windowId, "UP", "third", tick + 2000, fresh),
+    () => reviseLockedCall(id, "UP", "third", start + 59_000, freshSpot(start + 59_000)),
     /already refused/,
   );
-  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revisionRefusal?.attempted, "AT STRIKE");
-  const lockedOnly = { ...locked!, revisedCall: undefined, revision: undefined, revisionRefusal: undefined };
-  localStorage.setItem("moneyos.btc.journal.v1", JSON.stringify([lockedOnly]));
+  assert.equal(loadLocks().find((row) => row.windowId === id)?.revisionRefusal?.attempted, "AT STRIKE");
+});
+
+test("a stale spot during minute 10 cannot change the call and does not use it up", () => {
+  const id = commitOnPostedStrike("STALE-CHANGE");
+  const start = MINUTE_10_OPEN + 10 * 60_000;
+  const mid = start + 30_000;
   assert.throws(
-    () => reviseLockedCall(locked!.windowId, "DOWN", "late", tick + 8000, fresh),
-    /locked after the ten-minute mark/,
+    () => reviseLockedCall(id, "DOWN", "stale at 10:00", start, { price: 80100, ts: start - 31_000, source: "manual" }),
+    /stale/,
   );
-  const late = loadLocks().find((row) => row.ticker === "HALF");
-  assert.equal(late?.revisedCall, undefined);
-  assert.equal(late?.revisionRefusal?.reason, "late");
   assert.throws(
-    () => reviseLockedCall(locked!.windowId, "UP", "later still", tick + 9000, fresh),
-    /already refused/,
+    () => reviseLockedCall(id, "DOWN", "stale at 10:30", mid, { price: 79000, ts: mid - 31_000, source: "manual" }),
+    /stale/,
   );
-  assert.equal(loadLocks().find((row) => row.ticker === "HALF")?.revisionRefusal?.reason, "late");
+  const untouched = loadLocks().find((row) => row.windowId === id);
+  assert.equal(untouched?.lockedCall, "UP");
+  assert.equal(untouched?.revisedCall, undefined);
+  assert.equal(untouched?.revision, undefined);
+  assert.equal(untouched?.revisionRefusal, undefined);
+  const changed = reviseLockedCall(id, "DOWN", "fresh after stale", mid, freshSpot(mid));
+  assert.equal(changed.revisedCall, "DOWN");
+  assert.equal(changed.revision?.reason, "fresh after stale");
+  assert.equal(changed.revisionRefusal, undefined);
 });
 
 test("a window the desk missed is marked MISSED and is never back-filled", () => {
