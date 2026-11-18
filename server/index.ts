@@ -8,6 +8,7 @@ import { handleChat } from "./chat.js";
 import { fetchMarket, fetchOrderbook } from "./kalshi-public.js";
 import { keysConfigured } from "./kalshi-private.js";
 import { passwordConfigured } from "./password.js";
+import { readOutsideActivity } from "./outside.js";
 import { placeConfirmedOrder, previewOrder, type OrderRequest } from "./orders.js";
 import { runScan, serverEdgeFor } from "./scan.js";
 import { startHourlyScanner } from "./scheduler.js";
@@ -86,6 +87,12 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, env: 
       const body = await readBody(req);
       const result = await handleChat({ message: String(body.message ?? ""), env });
       send(res, 200, result);
+      return true;
+    }
+    if (req.method === "GET" && url.pathname === "/api/desk/outside") {
+      // Read-only: signed GETs only. Nothing on this route can place, cancel or move money.
+      const hours = Number(url.searchParams.get("hours") || 24);
+      send(res, 200, await readOutsideActivity(env, Number.isFinite(hours) ? hours : 24));
       return true;
     }
     if (req.method === "GET" && url.pathname === "/api/desk/orders/log") {
