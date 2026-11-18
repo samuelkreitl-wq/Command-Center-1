@@ -31,6 +31,7 @@ Read from the environment. Do not commit values. Names:
 | `MONEY_DESK_ASSUMED_BANKROLL` | Optional dollars used only to illustrate quarter Kelly when shard cash cannot be read. |
 | `MONEY_DESK_DATA_DIR` | Optional directory for the pick log and the order log. |
 | `KALSHI_API_BASE` | Optional API origin override. |
+| `MOMENTUM_BOT_CLIENT_ORDER_PREFIX` | Optional. If the momentum bot is found and tags its orders, this prefix marks them in the read-only Outside / Momentum panel. See `docs/MOMENTUM_BOT_PANEL.md`. |
 
 A template with empty values is in [`.env.example`](./.env.example). The real `.env` is gitignored. Nothing in this repo places an order on its own: the hourly job and the assistant cannot call the order endpoint.
 
