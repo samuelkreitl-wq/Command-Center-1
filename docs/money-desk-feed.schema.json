@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/samuelkreitl-wq/Command-Center-1/blob/main/docs/money-desk-feed.schema.json",
+  "title": "Money Desk pick feed",
+  "description": "JSON document the hourly scan publishes for the Trade Log tab. The server reads it from MONEY_DESK_FEED_URL, which defaults to the raw file data/money-desk-feed.json on branch money-desk-data. Live Kalshi fills, positions, settlements, balance, and the P&L computed from them replace the same figures in this file. Picks, skipped orders, and notes stay here. The reader ignores unknown fields and skips a row that has neither a market nor a ticker. It does not place or cancel orders.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generated_at", "picks_today", "pick_log", "pnl"],
+  "properties": {
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 time the file was written."
+    },
+    "picks_today": {
+      "type": "array",
+      "description": "Picks for the current America/New_York day. When this array is present, including empty, the tab does not invent today's rows from the log.",
+      "items": { "$ref": "#/$defs/pick" }
+    },
+    "pick_log": {
+      "type": "array",
+      "description": "Full pick history, newest last or newest first. The tab sorts by timestamp.",
+      "items": { "$ref": "#/$defs/pick" }
+    },
+    "fills": {
+      "type": "array",
+      "description": "Optional fills that are not nested on a pick. Used only when the Kalshi fills request did not succeed. A successful Kalshi read, even an empty list, replaces every feed fill.",
+      "items": { "$ref": "#/$defs/fill" }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "Optional skipped orders that are not nested on a pick. Merged with pick_log[].skipped.",
+      "items": { "$ref": "#/$defs/skipped" }
+    },
+    "pnl": { "$ref": "#/$defs/pnl" }
+  },
+  "$defs": {
+    "pick": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["timestamp", "tab", "market", "ticker", "side", "price", "fair_prob", "edge", "stake", "verdict", "close_time", "fills", "skipped"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "tab": { "type": "string", "description": "Desk tab or category, such as Crypto, Sports, or Weather." },
+        "market": { "type": "string", "description": "Human title. A { title } object is also accepted." },
+        "ticker": { "type": "string", "description": "Kalshi market ticker, copied from the API." },
+        "side": { "type": "string", "enum": ["YES", "NO", "yes", "no"] },
+        "price": { "type": ["number", "null"], "description": "Entry price in dollars, 0 to 1. A whole number from 2 to 100 is read as cents." },
+        "fair_prob": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Model probability the side wins. A number from 2 to 100 is read as a percent." },
+        "edge": {
+          "description": "Edge after fees, in cents. A number, or { cents_per_contract_after_fees }.",
+          "oneOf": [
+            { "type": ["number", "null"] },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["cents_per_contract_after_fees"],
+              "properties": { "cents_per_contract_after_fees": { "type": "number" } }
+            }
+          ]
+        },
+        "stake": {
+          "description": "Suggested stake in dollars, or { contracts, cost_dollars }.",
+          "oneOf": [
+            { "type": ["number", "null"] },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "contracts": { "type": ["number", "null"] },
+                "cost_dollars": { "type": ["number", "null"] }
+              }
+            }
+          ]
+        },
+        "verdict": { "type": "string", "enum": ["PASS", "WATCH", "FAIL"] },
+        "close_time": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": "string", "description": "Optional note from the scan. Shown on the pick. Not a Kalshi field." },
+        "fills": { "type": "array", "items": { "$ref": "#/$defs/fill" } },
+        "skipped": { "type": "array", "items": { "$ref": "#/$defs/skipped" } }
+      }
+    },
+    "fill": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "fill_id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "ticker": { "type": "string", "description": "Inherited from the parent pick when omitted." },
+        "side": { "type": "string" },
+        "action": { "type": "string", "description": "buy or sell when known." },
+        "price": { "type": ["number", "null"] },
+        "count": { "type": ["number", "null"] },
+        "fee": { "type": ["number", "null"], "description": "Dollars." },
+        "exchange_index": { "type": ["integer", "null"] }
+      }
+    },
+    "skipped": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["reason"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "tab": { "type": "string" },
+        "market": { "type": "string" },
+        "ticker": { "type": "string" },
+        "side": { "type": "string" },
+        "price": { "type": ["number", "null"] },
+        "count": { "type": ["number", "null"] },
+        "reason": { "type": "string" },
+        "verdict": { "type": "string" }
+      }
+    },
+    "pnl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["realized", "unrealized", "total", "by_day"],
+      "description": "Feed P&L. Shown only when Kalshi settlements and positions were not both unavailable for a live computation. When Kalshi answers, realized is settlement payout minus cost and fees, unrealized is the open mark minus cost basis, and by_day is settlement P&L grouped by America/New_York date.",
+      "properties": {
+        "realized": { "type": ["number", "null"], "description": "Dollars." },
+        "unrealized": { "type": ["number", "null"], "description": "Dollars." },
+        "total": { "type": ["number", "null"], "description": "Dollars. realized + unrealized when the publisher computed both." },
+        "by_day": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["date", "realized", "unrealized", "total"],
+            "properties": {
+              "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "America/New_York calendar date." },
+              "realized": { "type": ["number", "null"] },
+              "unrealized": { "type": ["number", "null"] },
+              "total": { "type": ["number", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}
