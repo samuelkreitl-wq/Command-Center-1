@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { MoneyBotSection } from "./MoneyBot";
 import { ArbSection, AssistantSection, HourlySection, OrdersSection, type OrderDraft } from "./sections";
 import { buildSnapshot, listJournal, listTradeLog, lockFromLive, placePaper, reviseLockedCall, setCustomReference, settleWindow, tenMinuteTick } from "./lib/desk";
 import { DESK_POLL_MS, pollDeskFeeds } from "./lib/feeds";
@@ -9,7 +10,7 @@ import type { ContractWindow, CoreLock, Direction, PaperTrade, TradeSide } from 
 import { windowNameByEnd } from "./lib/window-name";
 
 type Tab = "desk" | "journal" | "trades";
-type Section = "hourly" | "btc" | "arb" | "assistant" | "orders";
+type Section = "hourly" | "btc" | "arb" | "assistant" | "moneybot" | "orders";
 
 const money = (n: number | null | undefined, digits = 2) =>
   typeof n === "number" && Number.isFinite(n)
@@ -279,11 +280,13 @@ function App() {
         <button className={section === "btc" ? "active" : ""} onClick={() => setSection("btc")}>BTC 15</button>
         <button className={section === "arb" ? "active" : ""} onClick={() => setSection("arb")}>Sports arb</button>
         <button className={section === "assistant" ? "active" : ""} onClick={() => setSection("assistant")}>Assistant</button>
+        <button className={section === "moneybot" ? "active" : ""} onClick={() => setSection("moneybot")}>Money Bot</button>
         <button className={section === "orders" ? "active" : ""} onClick={() => setSection("orders")}>Place bet</button>
       </nav>
       {section === "hourly" && <HourlySection onPrepare={prepare} />}
       {section === "arb" && <ArbSection />}
       {section === "assistant" && <AssistantSection />}
+      {section === "moneybot" && <MoneyBotSection />}
       {section === "orders" && <OrdersSection draft={draft} />}
 
       {section === "btc" && <main className="main">

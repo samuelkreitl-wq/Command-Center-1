@@ -46,6 +46,10 @@ Keep separate: broker accounts, Notion (until a file log exists), music apps, dr
 2. Primary Alfonzo repo — AlfonzoCore or alfonzcore.
 3. Week-one workflows — confirm: paper status, Notion, one Alfonzo link.
 
+## Recommendation
+
+Consolidate AlfonzoCore into Command Center. AlfonzoCore is essentially what Command Center started as. Unifying them reduces duplication and keeps one central control plane. The written plan is [docs/alfonzocore-migration-plan.md](./docs/alfonzocore-migration-plan.md). Companion recommendations for other apps are in [docs/consolidation-migration-plan.md](./docs/consolidation-migration-plan.md). The October note to pick one Alfonzo repo later still stands as history. This recommendation does not merge the repositories and does not delete AlfonzoCore.
+
 ## Replit
 
 This file was committed to GitHub because Replit is not connected from the chat.
