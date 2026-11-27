@@ -13,6 +13,7 @@ import { runScan, serverEdgeFor } from "./scan.js";
 import { startHourlyScanner } from "./scheduler.js";
 import { deskRoot, readHistory, readOrderLog } from "./store.js";
 import { readFileSync } from "node:fs";
+import { handleMoneybot, readStakeFloor } from "./moneybot.js";
 
 const HOST = "0.0.0.0";
 const PORT = Number(process.env.PORT || 5000);
@@ -55,6 +56,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, env: 
         weatherCompany: Boolean(env.WEATHER_COMPANY_API_KEY),
         assumedBankroll: Boolean(env.MONEY_DESK_ASSUMED_BANKROLL),
         scanner: "hourly-et",
+        min_stake_usd: readStakeFloor(env).min_stake_usd,
       });
       return true;
     }
@@ -168,6 +170,10 @@ export function start(env: Record<string, string | undefined> = process.env): vo
       const url = req.url || "/";
       if (url.startsWith("/api/desk")) {
         await handleApi(req, res, env);
+        return;
+      }
+      if (url.startsWith("/api/moneybot")) {
+        await handleMoneybot(req, res, env);
         return;
       }
       if (url.startsWith("/api/kalshi")) {
